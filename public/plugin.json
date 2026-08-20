@@ -1,0 +1,72 @@
+{
+  "name": "node-manager",
+  "pluginName": "Node 版本管理",
+  "description": "管理多版本 Node.js，切换镜像源，快速打开配置文件",
+  "main": "index.html",
+  "preload": "preload/services.js",
+  "logo": "logo.png",
+  "version": "1.1.0",
+  "author": "Tofu",
+  "features": [
+    {
+      "code": "node-manager",
+      "explain": "Node 版本管理",
+      "cmds": ["node", "nvm", "npm"]
+    },
+    {
+      "code": "mirror-manager",
+      "explain": "切换 npm 镜像源",
+      "cmds": ["镜像", "镜像源", "registry", "npm镜像"]
+    },
+    {
+      "code": "package-manager",
+      "explain": "管理 npm 全局包",
+      "cmds": ["全局包", "npm包", "global", "包管理"]
+    },
+    {
+      "code": "open-npmrc",
+      "explain": "打开 .npmrc 配置文件",
+      "cmds": [".npmrc", "npmrc"]
+    },
+    {
+      "code": "open-nvmrc",
+      "explain": "打开 .nvmrc 配置文件",
+      "cmds": [".nvmrc", "nvmrc"]
+    },
+    {
+      "code": "open-node-version",
+      "explain": "打开 .node-version 配置文件",
+      "cmds": [".node-version", "node-version"]
+    },
+    {
+      "code": "open-hosts",
+      "explain": "打开 hosts 文件",
+      "cmds": ["hosts", "hosts文件"]
+    },
+    {
+      "code": "open-npm-config",
+      "explain": "打开 npm 全局配置目录",
+      "cmds": ["npm配置", "npm config"]
+    },
+    {
+      "code": "open-nvm-dir",
+      "explain": "打开 nvm 安装目录",
+      "cmds": ["nvm目录", "nvm dir"]
+    },
+    {
+      "code": "env-manager",
+      "explain": "查看 Node 环境变量",
+      "cmds": ["环境变量", "env", "node环境"]
+    },
+    {
+      "code": "process-manager",
+      "explain": "管理 Node 进程",
+      "cmds": ["node进程", "进程管理", "tasklist"]
+    },
+    {
+      "code": "disk-usage",
+      "explain": "分析 Node 磁盘占用",
+      "cmds": ["磁盘", "占用", "清理", "disk"]
+    }
+  ]
+}

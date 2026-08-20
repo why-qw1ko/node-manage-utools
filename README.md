@@ -1,2 +1,193 @@
-# node-manage-utools
-node多版本管理utools插件，前提已经装了nvm，可视化方便切换node版本
+# Node 版本管理 — utools 插件
+
+一个 utools 插件，用于管理多版本 Node.js、切换镜像源、管理全局包、查看环境变量和进程。
+
+## 功能概览
+
+### Node 版本管理（依赖 nvm-windows）
+- 显示当前 Node.js 版本及已安装版本列表
+- 切换已安装版本，设置默认版本
+- 安装 / 卸载指定版本
+- **版本搜索与过滤**：按版本号搜索，支持全部/当前使用/LTS 过滤
+- **安装进度反馈**：实时显示安装日志
+- **安装源配置**：一键切换 Node/npm 安装源（官方/淘宝/华为云）
+- **项目版本自动检测**：打开项目目录时自动检测 `.nvmrc`/`.node-version` 并提示切换
+
+### 镜像源切换
+- 内置源：npm 官方、淘宝 npmmirror、华为云、腾讯云
+- 支持添加 / 删除自定义镜像源
+- 一键切换、复制 registry URL
+- 自定义镜像源通过 utools.db 持久化保存
+
+### 全局包管理
+- 查看所有全局安装的 npm 包
+- 搜索过滤包名
+- 安装新包 / 卸载 / 更新单个包
+- 实时显示操作进度
+
+### 配置文件快速打开
+- `.npmrc`（用户级 & 全局）
+- `.nvmrc` / `.node-version`
+- `hosts`
+- npm 全局目录 / 缓存目录
+- nvm 安装目录
+- **npm 配置可视化**：展示完整 `npm config list`，支持复制
+
+### 环境变量管理
+- 查看 Node 相关系统环境变量（`NODE_ENV`、`NVM_HOME`、`PATH` 等）
+- 查看 npm 配置项（`prefix`、`cache`、`registry` 等）
+- 一键复制变量值
+
+### Node 进程管理
+- 查看当前运行的 Node.js 进程
+- 显示 PID、内存占用、启动命令
+- 终止指定进程
+
+### 磁盘占用分析
+- 分析各 Node.js 版本的磁盘占用
+- 查看 npm 缓存大小、全局包总大小
+- 一键清理 npm 缓存
+
+## utools 关键词入口
+
+| 关键词 | 功能 |
+|--------|------|
+| `node` `nvm` `npm` `管理` | 进入主界面 |
+| `镜像` `镜像源` `registry` | 进入镜像源管理 |
+| `全局包` `npm包` `global` `包管理` | 进入全局包管理 |
+| `.npmrc` `npmrc` | 直接打开 .npmrc |
+| `.nvmrc` `nvmrc` | 直接打开 .nvmrc |
+| `.node-version` | 直接打开 .node-version |
+| `hosts` `hosts文件` | 直接打开 hosts 文件 |
+| `npm配置` `npm config` | 打开 npm 全局配置目录 |
+| `nvm目录` `nvm dir` | 打开 nvm 安装目录 |
+| `环境变量` `env` `node环境` | 进入环境变量管理 |
+| `node进程` `进程管理` `tasklist` | 进入进程管理 |
+| `磁盘` `占用` `清理` `disk` | 进入磁盘占用分析 |
+
+## 技术栈
+
+| 层 | 技术 | 说明 |
+|----|------|------|
+| 框架 | Vue 3 | Composition API + `<script setup>` |
+| 构建 | Vite 6 | `base: './'` 相对路径，适配 utools 本地加载 |
+| 图标 | unplugin-icons + @iconify-json | 构建时编译为 inline SVG，零外部请求 |
+| Node 桥接 | preload/services.js | 通过 `window.nodeAPI` 暴露 exec、fs、path、os |
+| 持久化 | utools.db | 仅保存自定义镜像源 |
+
+## 项目结构
+
+```
+Node多版本管理/
+├── public/
+│   ├── plugin.json              # utools 插件配置（入口、关键词、preload）
+│   ├── preload/
+│   │   ├── services.js          # Node.js 能力桥接（child_process / fs / path / os）
+│   │   ├── nvm-settings.js      # NVM 配置定点更新与 root 保护
+│   │   └── package.json         # type: commonjs（preload 需 CJS 格式）
+│   └── logo.png                 # 插件图标
+├── src/
+│   ├── main.js                  # Vue 入口
+│   ├── main.css                 # 全局样式、CSS 变量（浅色/深色主题）
+│   ├── App.vue                  # 主布局，utools.onPluginEnter 事件调度
+│   ├── views/
+│   │   ├── NodeManager.vue      # Node 版本管理页
+│   │   ├── MirrorManager.vue    # 镜像源管理页
+│   │   ├── PackageManager.vue   # 全局包管理页
+│   │   ├── ConfigFiles.vue      # 配置文件管理页
+│   │   ├── EnvManager.vue       # 环境变量管理页
+│   │   ├── ProcessManager.vue   # 进程管理页
+│   │   └── DiskUsage.vue        # 磁盘占用分析页
+│   ├── components/
+│   │   ├── Sidebar.vue          # 侧边导航栏
+│   │   ├── VersionCard.vue      # 版本卡片（切换/卸载）
+│   │   ├── MirrorCard.vue       # 镜像源卡片（切换/复制/删除）
+│   │   ├── PackageCard.vue      # 全局包卡片（更新/卸载）
+│   │   ├── EnvCard.vue          # 环境变量卡片（复制值）
+│   │   ├── ProcessCard.vue      # 进程卡片（终止进程）
+│   │   └── ConfigFileCard.vue   # 配置文件卡片（打开/复制路径）
+│   ├── utils/
+│   │   ├── command.js           # 命令执行封装（exec / execWithProgress）
+│   │   ├── nvm.js               # nvm-windows 操作（list/install/use/uninstall）
+│   │   ├── nvm-mirror.js        # nvm 安装源配置（node_mirror / npm_mirror）
+│   │   ├── npm.js               # npm 操作（registry/config/list）
+│   │   ├── store.js             # utools.db 持久化封装
+│   │   └── utools.js            # utools API 封装（通知/剪贴板/打开路径/Toast）
+│   └── constants/
+│       ├── mirrors.js           # 内置镜像源列表
+│       └── files.js             # 配置文件路径定义（npmrc/nvmrc/hosts 等）
+├── vite.config.js               # Vite 构建配置
+├── jsconfig.json
+├── package.json
+└── .gitignore
+```
+
+## 开发
+
+```bash
+# 安装依赖
+npm install
+
+# 开发模式（localhost:5173）
+npm run dev
+
+# 生产构建（输出到 dist/）
+npm run build
+
+# 预览构建产物
+npm run preview
+```
+
+### utools 开发模式
+
+1. 运行 `npm run dev` 启动开发服务器
+2. 在 utools 开发者工具中加载项目目录（会读取 `public/plugin.json`）
+3. `plugin.json` 中 `development.main` 指向 `http://localhost:5173`，utools 会自动连接
+
+## 构建产物
+
+```
+dist/
+├── index.html              # 入口页面
+├── plugin.json             # 插件配置（从 public/ 复制）
+├── logo.png                # 图标（从 public/ 复制）
+├── preload/
+│   ├── services.js         # Node.js API 桥接（从 public/ 复制）
+│   └── package.json        # type: commonjs
+└── assets/
+    ├── index-*.css         # 样式
+    └── index-*.js          # 应用逻辑（Vue + 组件 + 工具）
+```
+
+## 注意事项
+
+### preload 桥接
+所有 Node.js API（child_process、fs、path、os）通过 `preload/services.js` 注入到 `window.nodeAPI`，渲染进程不直接使用 `require`。preload 目录下 `package.json` 声明 `"type": "commonjs"` 以确保 CJS 模块正常加载。
+
+### nvm-windows
+- 插件通过 `NVM_HOME` 环境变量检测 nvm-windows 是否安装
+- 未安装时不提供版本管理功能，镜像源和配置文件功能不受影响
+
+### 数据持久化
+- 自定义镜像源通过 `utools.db` 存储，键前缀 `node-manager:`
+- 当前 registry 每次从 npm 配置读取，不在插件数据库中重复缓存
+- Node 已安装版本、NVM 路径和环境变量均不写入 `utools.db`
+
+### NVM 配置保护
+- 读取安装源时只读取 `settings.txt`，不会调用 NVM 配置命令
+- 切换安装源时仅更新 `node_mirror` 或 `npm_mirror`
+- 写入前创建 `.mirror-backup` 备份，并校验 `root` 未发生变化
+
+### 图标
+使用 `unplugin-icons` 在构建时将 `@iconify-json/mdi` 和 `@iconify-json/logos` 中的图标编译为 inline SVG 组件，运行时无外部网络请求。
+
+### Toast 提示
+插件内置了类型化的 Toast 提示系统：
+- **成功**（绿色）：操作成功完成
+- **错误**（红色）：操作失败
+- **警告**（黄色）：输入校验等警告
+- **默认**（深色）：普通信息提示
+
+## License
+
+MIT
