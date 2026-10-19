@@ -5,6 +5,7 @@ import IconFileCogOutline from '~icons/mdi/file-cog-outline';
 import IconPackageVariant from '~icons/mdi/package-variant';
 import IconEarth from '~icons/mdi/earth';
 import IconApplicationCogOutline from '~icons/mdi/application-cog-outline';
+import IconFolderLockOpen from '~icons/mdi/folder-lock-open';
 import IconHarddisk from '~icons/mdi/harddisk';
 
 defineProps({
@@ -21,6 +22,7 @@ const tabs = [
   { id: 'config', label: '配置文件', icon: IconFileCogOutline },
   { id: 'env', label: '环境变量', icon: IconEarth },
   { id: 'process', label: '进程管理', icon: IconApplicationCogOutline },
+  { id: 'unlock', label: '文件夹解除占用', icon: IconFolderLockOpen },
   { id: 'disk', label: '磁盘分析', icon: IconHarddisk },
 ];
 </script>

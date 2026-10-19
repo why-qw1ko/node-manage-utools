@@ -64,6 +64,11 @@
       "cmds": ["node进程", "进程管理", "tasklist"]
     },
     {
+      "code": "folder-unlock",
+      "explain": "文件夹解除占用",
+      "cmds": ["解除占用", "文件夹占用", "文件占用", "unlock"]
+    },
+    {
       "code": "disk-usage",
       "explain": "分析 Node 磁盘占用",
       "cmds": ["磁盘", "占用", "清理", "disk"]

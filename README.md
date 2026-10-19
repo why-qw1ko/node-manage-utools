@@ -42,6 +42,12 @@
 - 查看当前运行的 Node.js 进程
 - 显示 PID、内存占用、启动命令
 - 终止指定进程
+- **按端口关闭**：输入端口号，自动检测占用进程及其目录、命令行等详细信息，检测到系统进程时给出危险警告与二次确认后终止
+
+### 文件夹解除占用
+- 查找并关闭占用指定文件夹的进程，解决“文件夹正在使用、无法删除或重命名”的问题
+- 支持手动输入路径、系统对话框选择、读取当前资源管理器路径
+- 系统进程强杀前给出危险警告与二次确认
 
 ### 磁盘占用分析
 - 分析各 Node.js 版本的磁盘占用
@@ -63,6 +69,7 @@
 | `nvm目录` `nvm dir` | 打开 nvm 安装目录 |
 | `环境变量` `env` `node环境` | 进入环境变量管理 |
 | `node进程` `进程管理` `tasklist` | 进入进程管理 |
+| `解除占用` `文件夹占用` `文件占用` `unlock` | 进入文件夹解除占用 |
 | `磁盘` `占用` `清理` `disk` | 进入磁盘占用分析 |
 
 ## 技术栈
@@ -97,6 +104,7 @@ Node多版本管理/
 │   │   ├── ConfigFiles.vue      # 配置文件管理页
 │   │   ├── EnvManager.vue       # 环境变量管理页
 │   │   ├── ProcessManager.vue   # 进程管理页
+│   │   ├── FolderUnlock.vue     # 文件夹解除占用页
 │   │   └── DiskUsage.vue        # 磁盘占用分析页
 │   ├── components/
 │   │   ├── Sidebar.vue          # 侧边导航栏
@@ -105,12 +113,14 @@ Node多版本管理/
 │   │   ├── PackageCard.vue      # 全局包卡片（更新/卸载）
 │   │   ├── EnvCard.vue          # 环境变量卡片（复制值）
 │   │   ├── ProcessCard.vue      # 进程卡片（终止进程）
+│   │   ├── PortKillDialog.vue   # 按端口关闭进程弹窗
 │   │   └── ConfigFileCard.vue   # 配置文件卡片（打开/复制路径）
 │   ├── utils/
 │   │   ├── command.js           # 命令执行封装（exec / execWithProgress）
 │   │   ├── nvm.js               # nvm-windows 操作（list/install/use/uninstall）
 │   │   ├── nvm-mirror.js        # nvm 安装源配置（node_mirror / npm_mirror）
 │   │   ├── npm.js               # npm 操作（registry/config/list）
+│   │   ├── process.js           # 进程/端口/文件夹占用检测与终止
 │   │   ├── store.js             # utools.db 持久化封装
 │   │   └── utools.js            # utools API 封装（通知/剪贴板/打开路径/Toast）
 │   └── constants/

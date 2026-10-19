@@ -7,6 +7,7 @@ import PackageManager from './views/PackageManager.vue';
 import ConfigFiles from './views/ConfigFiles.vue';
 import EnvManager from './views/EnvManager.vue';
 import ProcessManager from './views/ProcessManager.vue';
+import FolderUnlock from './views/FolderUnlock.vue';
 import DiskUsage from './views/DiskUsage.vue';
 import ConfirmDialog from './components/ConfirmDialog.vue';
 import { isNvmInstalled, useVersion } from './utils/nvm.js';
@@ -24,6 +25,7 @@ const views = {
   config: ConfigFiles,
   env: EnvManager,
   process: ProcessManager,
+  unlock: FolderUnlock,
   disk: DiskUsage,
 };
 const activeView = computed(() => views[activeTab.value] || NodeManager);
@@ -107,6 +109,7 @@ function handlePluginEnter(action) {
   else if (action.code === 'package-manager') activeTab.value = 'packages';
   else if (action.code === 'env-manager') activeTab.value = 'env';
   else if (action.code === 'process-manager') activeTab.value = 'process';
+  else if (action.code === 'folder-unlock') activeTab.value = 'unlock';
   else if (action.code === 'disk-usage') activeTab.value = 'disk';
 
   // Detect project version when entering with a path

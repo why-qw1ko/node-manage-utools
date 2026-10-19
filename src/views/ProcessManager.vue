@@ -3,7 +3,9 @@ import { ref, onMounted } from 'vue';
 import IconApplicationCogOutline from '~icons/mdi/application-cog-outline';
 import IconRefresh from '~icons/mdi/refresh';
 import IconLoading from '~icons/mdi/loading';
+import IconLanDisconnect from '~icons/mdi/lan-disconnect';
 import ProcessCard from '../components/ProcessCard.vue';
+import PortKillDialog from '../components/PortKillDialog.vue';
 import { execFileCommand } from '../utils/command.js';
 import { showSuccess, showError } from '../utils/utools.js';
 import { confirmAction } from '../utils/confirm.js';
@@ -12,6 +14,7 @@ const processes = ref([]);
 const loading = ref(false);
 const killingPid = ref(null);
 const loadError = ref('');
+const showPortDialog = ref(false);
 
 async function loadProcesses(silent = false) {
   loading.value = true;
@@ -91,9 +94,14 @@ onMounted(() => loadProcesses(true)); // silent on initial load
     <div class="section">
       <div class="section-header">
         <h2 class="section-title"><IconApplicationCogOutline class="icon" /> Node 进程管理</h2>
-        <button class="btn btn-sm btn-secondary" :disabled="loading" @click="loadProcesses()">
-          <IconRefresh :class="{ spin: loading }" /> {{ loading ? '刷新中' : '刷新' }}
-        </button>
+        <div class="header-actions">
+          <button class="btn btn-sm btn-secondary" :disabled="loading" @click="loadProcesses()">
+            <IconRefresh :class="{ spin: loading }" /> {{ loading ? '刷新中' : '刷新' }}
+          </button>
+          <button class="btn btn-sm btn-secondary" @click="showPortDialog = true">
+            <IconLanDisconnect /> 按端口关闭
+          </button>
+        </div>
       </div>
       <p class="section-desc">查看和管理当前运行的 Node.js 进程</p>
     </div>
@@ -119,6 +127,8 @@ onMounted(() => loadProcesses(true)); // silent on initial load
         @kill="handleKill"
       />
     </div>
+
+    <PortKillDialog v-model="showPortDialog" @killed="loadProcesses(true)" />
   </div>
 </template>
 
@@ -126,6 +136,7 @@ onMounted(() => loadProcesses(true)); // silent on initial load
 .view { height: 100%; overflow-y: auto; padding: 20px; }
 .section { margin-bottom: 24px; }
 .section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.header-actions { display: flex; align-items: center; gap: 8px; }
 .section-title { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 700; color: var(--text); }
 .section-desc { font-size: 13px; color: var(--text-secondary); }
 .icon { width: 20px; height: 20px; color: var(--primary); }
