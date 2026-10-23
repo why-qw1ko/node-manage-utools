@@ -56,14 +56,14 @@ export async function getCurrentNodeVersion() {
 export async function listInstalledVersions() {
   const output = await execFileCommand('nvm', ['list']);
   const lines = output.split('\n').filter((line) => line.trim());
-  const current = await getCurrentNodeVersion();
+  const current = (await getCurrentNodeVersion())?.replace(/^v/i, '');
   const nvmHome = window.nodeAPI.env.NVM_HOME;
 
   return lines.map((line) => {
     const match = line.match(/\bv?(\d+\.\d+\.\d+)\b/i);
     if (!match) return null;
     const version = match[1];
-    const active = line.includes('*') || Boolean(current && current.includes(version));
+    const active = line.includes('*') || current === version;
     return {
       version,
       active,

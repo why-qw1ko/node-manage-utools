@@ -89,7 +89,7 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown));
 </template>
 
 <style scoped>
-.confirm-overlay { position: fixed; inset: 0; z-index: 3000; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(3px); }
+.confirm-overlay { position: fixed; inset: 0; z-index: 4000; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(3px); }
 .confirm-dialog { display: flex; gap: 14px; width: min(420px, 100%); padding: 20px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); }
 .confirm-icon { display: grid; place-items: center; width: 36px; height: 36px; flex: 0 0 36px; color: var(--warning); background: var(--warning-dim); border-radius: var(--radius-full); }
 .confirm-icon.danger { color: var(--danger); background: var(--danger-dim); }

@@ -1,6 +1,6 @@
 import { execFileCommand, getNpmExecutable } from './command.js';
 
-const PACKAGE_SPEC_PATTERN = /^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+(?:@[a-z0-9._-]+)?$/i;
+const PACKAGE_SPEC_PATTERN = /^(?:@[a-z0-9._][a-z0-9._-]*\/)?[a-z0-9._][a-z0-9._-]*(?:@[a-z0-9._-]+)?$/i;
 
 function npm(args, options) {
   return execFileCommand(getNpmExecutable(), args, options);

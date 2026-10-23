@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeNodeVersion, parseAvailableVersions } from '../src/utils/nvm.js';
+import { normalizeNodeVersion, parseAvailableVersions, listInstalledVersions } from '../src/utils/nvm.js';
 
 test('normalizeNodeVersion accepts supported forms', () => {
   assert.equal(normalizeNodeVersion('v22.14.0'), '22.14.0');
@@ -11,6 +11,23 @@ test('normalizeNodeVersion accepts supported forms', () => {
 test('normalizeNodeVersion rejects shell fragments and invalid versions', () => {
   assert.throws(() => normalizeNodeVersion('22.14.0 & whoami'), /版本号格式无效/);
   assert.throws(() => normalizeNodeVersion('../22.14.0'), /版本号格式无效/);
+});
+
+test('installed versions mark only the exact current version as active', async (t) => {
+  const previous = globalThis.window;
+  t.after(() => { globalThis.window = previous; });
+  globalThis.window = {
+    nodeAPI: {
+      env: { NVM_HOME: 'C:\\nvm' },
+      path: { join: (...parts) => parts.join('\\') },
+      execFile: async (file, args) => file === 'nvm'
+        ? '  2.11.0\n* 22.11.0\n'
+        : 'v22.11.0',
+    },
+  };
+  const versions = await listInstalledVersions();
+  assert.equal(versions.find((item) => item.version === '2.11.0')?.active, false);
+  assert.equal(versions.find((item) => item.version === '22.11.0')?.active, true);
 });
 
 test('parseAvailableVersions parses nvm-windows table and marks LTS column', () => {

@@ -15,6 +15,20 @@ function psQuote(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
+const FOLDER_MATCH_SCRIPT = [
+  'function Get-FolderMatchReasons {',
+  '  param([string]$Directory, [string]$Executable, [string]$CommandLine)',
+  "  $base = $Directory.TrimEnd('\\', '/')",
+  '  $reasons = @()',
+  "  if ($Executable -and $Executable.StartsWith($base + '\\', [System.StringComparison]::OrdinalIgnoreCase)) { $reasons += '可执行文件位于该目录' }",
+  '  if ($CommandLine) {',
+  "    $pattern = '(^|[\\s\"''=])' + [regex]::Escape($base) + '($|[\\\\/\\s\"'';,])'",
+  "    if ([regex]::IsMatch($CommandLine, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) { $reasons += '命令行引用该目录' }",
+  '  }',
+  '  return $reasons',
+  '}',
+];
+
 /** Parse PowerShell `ConvertTo-Json` output that may be an object or array. */
 function parseJsonCollection(output) {
   const raw = output && output.trim() ? JSON.parse(output) : [];
@@ -85,9 +99,10 @@ export async function detectPort(port) {
     '$ownerPids = $conns | Select-Object -ExpandProperty OwningProcess -Unique',
     '$rows = foreach ($ownerPid in $ownerPids) {',
     '  $p = Get-CimInstance Win32_Process -Filter "ProcessId = $ownerPid" -ErrorAction SilentlyContinue',
-    '  if (-not $p) { continue }',
+    '  if (-not $p -or -not $p.CreationDate) { continue }',
     '  [PSCustomObject]@{',
     '    pid = [string]$p.ProcessId',
+    '    createdAt = $p.CreationDate.ToUniversalTime().Ticks.ToString()',
     '    name = [string]$p.Name',
     '    exe = [string]$p.ExecutablePath',
     '    cmd = [string]$p.CommandLine',
@@ -103,49 +118,74 @@ export async function detectPort(port) {
   return parseJsonCollection(output)
     .map((item) => ({
       pid: String(item.pid || ''),
+      createdAt: String(item.createdAt || ''),
       name: item.name || '',
       exe: item.exe || '',
       cmd: item.cmd || '',
       memory: formatBytes(item.mem),
       parentPid: item.parentPid ? String(item.parentPid) : '',
     }))
-    .filter((process) => process.pid);
+    .filter((process) => process.pid && /^\d+$/.test(process.createdAt));
 }
 
-/**
- * Kill the process currently listening on a port, re-verifying ownership first.
- * @param {string|number} port
- * @param {string|number} pid
- * @returns {Promise<void>}
- */
-export async function killPortProcess(port, pid) {
+/** Kill the originally detected process only while it still listens on the port. */
+export async function killPortProcess(port, process) {
   const numericPort = Number(port);
-  const numericPid = Number(pid);
+  const numericPid = Number(process?.pid);
+  const createdAt = String(process?.createdAt || '');
+  if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65535) {
+    throw new Error('端口号无效，请输入 1-65535 之间的整数');
+  }
+  if (!Number.isInteger(numericPid) || numericPid <= 0) {
+    throw new Error('进程 ID 无效');
+  }
+  if (!/^\d+$/.test(createdAt) || createdAt === '0') {
+    throw new Error('缺少进程身份信息，请重新检测');
+  }
   const script = [
     "$ErrorActionPreference = 'Stop'",
     `$port = ${numericPort}`,
     `$target = ${numericPid}`,
+    `$createdAt = ${psQuote(createdAt)}`,
+    '$p = Get-CimInstance Win32_Process -Filter "ProcessId = $target" -ErrorAction Stop',
+    "if (-not $p -or -not $p.CreationDate -or $p.CreationDate.ToUniversalTime().Ticks.ToString() -ne $createdAt) { throw '进程已变化，请重新检测' }",
     '$still = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess -eq $target })',
     "if ($still.Count -eq 0) { throw '该端口已不再被此进程占用，无需关闭' }",
-    'Stop-Process -Id $target -Force -ErrorAction Stop',
+    '$targetProcess = Get-Process -Id $target -ErrorAction Stop',
+    "if ([math]::Abs($targetProcess.StartTime.ToUniversalTime().Ticks - [long]$createdAt) -gt 10000) { throw '进程已变化，请重新检测' }",
+    '$targetProcess.Kill()',
   ].join('\n');
   await runPs(script);
 }
 
-/**
- * Kill a process by PID.
- * @param {string|number} pid
- * @returns {Promise<void>}
- */
-export async function killProcess(pid) {
-  const numericPid = Number(pid);
+/** Kill a previously detected folder process only if its identity and match still hold. */
+export async function killProcess(process, folderPath) {
+  const numericPid = Number(process?.pid);
+  const createdAt = String(process?.createdAt || '');
+  const target = String(folderPath || '').trim();
   if (!Number.isInteger(numericPid) || numericPid <= 0) {
     throw new Error('进程 ID 无效');
   }
+  if (!/^\d+$/.test(createdAt) || createdAt === '0') {
+    throw new Error('缺少进程身份信息，请重新检测');
+  }
+  if (!target) throw new Error('请先输入或选择一个文件夹路径');
+
   const script = [
     "$ErrorActionPreference = 'Stop'",
+    ...FOLDER_MATCH_SCRIPT,
+    `$folder = ${psQuote(target)}`,
+    '$item = Get-Item -LiteralPath $folder -ErrorAction Stop',
+    '$full = $item.FullName',
     `$target = ${numericPid}`,
-    'Stop-Process -Id $target -Force -ErrorAction Stop',
+    `$createdAt = ${psQuote(createdAt)}`,
+    '$p = Get-CimInstance Win32_Process -Filter "ProcessId = $target" -ErrorAction Stop',
+    "if (-not $p -or -not $p.CreationDate -or $p.CreationDate.ToUniversalTime().Ticks.ToString() -ne $createdAt) { throw '进程已变化，请重新检测' }",
+    '$reasons = @(Get-FolderMatchReasons $full ([string]$p.ExecutablePath) ([string]$p.CommandLine))',
+    "if ($reasons.Count -eq 0) { throw '该进程已不再匹配此目录，请重新检测' }",
+    '$targetProcess = Get-Process -Id $target -ErrorAction Stop',
+    "if ([math]::Abs($targetProcess.StartTime.ToUniversalTime().Ticks - [long]$createdAt) -gt 10000) { throw '进程已变化，请重新检测' }",
+    '$targetProcess.Kill()',
   ].join('\n');
   await runPs(script);
 }
@@ -161,22 +201,21 @@ export async function findFolderOccupiers(folderPath) {
 
   const script = [
     "$ErrorActionPreference = 'Stop'",
+    ...FOLDER_MATCH_SCRIPT,
     `$folder = ${psQuote(target)}`,
     "if (-not (Test-Path -LiteralPath $folder)) { throw '路径不存在或无法访问' }",
     '$item = Get-Item -LiteralPath $folder -ErrorAction Stop',
     '$full = $item.FullName',
-    "$norm = $full.TrimEnd('\\') + '\\'",
     '$procs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue',
     '$rows = foreach ($p in $procs) {',
+    '  if ($p.ProcessId -eq $PID -or -not $p.CreationDate) { continue }',
     '  $exe = [string]$p.ExecutablePath',
     '  $cmd = [string]$p.CommandLine',
-    '  $match = $false',
-    '  $reasons = @()',
-    "  if ($exe -and $exe.StartsWith($norm, [System.StringComparison]::OrdinalIgnoreCase)) { $match = $true; $reasons += '可执行文件位于该目录' }",
-    "  if ($cmd -and $cmd.IndexOf($full, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { $match = $true; $reasons += '命令行引用该目录' }",
-    '  if ($match) {',
+    '  $reasons = @(Get-FolderMatchReasons $full $exe $cmd)',
+    '  if ($reasons.Count -gt 0) {',
     '    [PSCustomObject]@{',
     '      pid = [string]$p.ProcessId',
+    '      createdAt = $p.CreationDate.ToUniversalTime().Ticks.ToString()',
     '      name = [string]$p.Name',
     '      exe = $exe',
     '      cmd = $cmd',
@@ -193,19 +232,19 @@ export async function findFolderOccupiers(folderPath) {
   const items = parseJsonCollection(output)
     .map((item) => ({
       pid: String(item.pid || ''),
+      createdAt: String(item.createdAt || ''),
       name: item.name || '',
       exe: item.exe || '',
       cmd: item.cmd || '',
       memory: formatBytes(item.mem),
       reason: item.reason || '',
     }))
-    .filter((process) => process.pid);
+    .filter((process) => process.pid && /^\d+$/.test(process.createdAt));
 
   // 可执行文件就在目录内的进程优先展示。
-  const normalized = target.replace(/[\\/]+$/, '').toLowerCase();
   return items.sort((a, b) => {
-    const aInside = a.exe.toLowerCase().startsWith(normalized) ? 1 : 0;
-    const bInside = b.exe.toLowerCase().startsWith(normalized) ? 1 : 0;
+    const aInside = a.reason.includes('可执行文件位于该目录') ? 1 : 0;
+    const bInside = b.reason.includes('可执行文件位于该目录') ? 1 : 0;
     return bInside - aInside;
   });
 }

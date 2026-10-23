@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue';
+import { ref, watch } from 'vue';
 import IconFolderLockOpen from '~icons/mdi/folder-lock-open';
 import IconFolderSearch from '~icons/mdi/folder-search';
 import IconFolderOpenOutline from '~icons/mdi/folder-open-outline';
@@ -17,6 +17,19 @@ const detected = ref(false);
 const results = ref([]);
 const error = ref('');
 const killingPid = ref(null);
+const detectedFolder = ref('');
+let requestId = 0;
+
+function invalidateResults() {
+  requestId += 1;
+  loading.value = false;
+  detected.value = false;
+  detectedFolder.value = '';
+  results.value = [];
+  error.value = '';
+}
+
+watch(folder, invalidateResults, { flush: 'sync' });
 
 function chooseFolder() {
   const selected = utools.showOpenDialog({
@@ -24,42 +37,45 @@ function chooseFolder() {
     properties: ['openDirectory'],
   });
   if (selected && selected[0]) {
+    invalidateResults();
     folder.value = selected[0];
-    detected.value = false;
-    results.value = [];
   }
 }
 
 async function readCurrentFolder() {
+  invalidateResults();
+  const startedAt = requestId;
   try {
     const path = await utools.readCurrentFolderPath();
+    if (startedAt !== requestId) return;
     if (path) {
+      invalidateResults();
       folder.value = path;
-      detected.value = false;
-      results.value = [];
     } else {
       showError('无法读取当前文件夹');
     }
   } catch {
-    showError('无法读取当前文件夹，请打开一个资源管理器窗口后重试');
+    if (startedAt === requestId) showError('无法读取当前文件夹，请打开一个资源管理器窗口后重试');
   }
 }
 
 async function handleDetect() {
   const value = folder.value.trim();
   if (!value) { showError('请先输入或选择文件夹路径'); return; }
+  invalidateResults();
+  const currentRequest = requestId;
   loading.value = true;
-  detected.value = false;
-  error.value = '';
-  results.value = [];
   try {
-    results.value = await findFolderOccupiers(value);
+    const items = await findFolderOccupiers(value);
+    if (currentRequest !== requestId) return;
+    results.value = items;
+    detectedFolder.value = value;
     detected.value = true;
-    if (results.value.length === 0) showSuccess('未发现占用该目录的进程');
+    if (items.length === 0) showSuccess('未检测到匹配的进程');
   } catch (err) {
-    error.value = err.message || '检测失败';
+    if (currentRequest === requestId) error.value = err.message || '检测失败';
   } finally {
-    loading.value = false;
+    if (currentRequest === requestId) loading.value = false;
   }
 }
 
@@ -90,11 +106,17 @@ async function confirmKill(proc) {
 }
 
 async function handleKill(proc) {
+  const currentRequest = requestId;
+  const path = detectedFolder.value;
   const confirmed = await confirmKill(proc);
   if (!confirmed) return;
+  if (currentRequest !== requestId || !path || folder.value.trim() !== path || !results.value.includes(proc)) {
+    showError('检测结果已过期，请重新检测');
+    return;
+  }
   killingPid.value = proc.pid;
   try {
-    await killProcess(proc.pid);
+    await killProcess(proc, path);
     showSuccess(`已关闭进程 ${proc.pid}`);
     results.value = results.value.filter((p) => p.pid !== proc.pid);
   } catch (err) {
@@ -120,7 +142,7 @@ function dirname(p) {
       <div class="section-header">
         <h2 class="section-title"><IconFolderLockOpen class="icon" /> 文件夹解除占用</h2>
       </div>
-      <p class="section-desc">查找并关闭占用指定文件夹的进程，解决“文件夹正在使用、无法删除或重命名”的问题</p>
+      <p class="section-desc">根据进程路径或命令行查找可能占用该文件夹的进程</p>
     </div>
 
     <div class="search-card">
@@ -130,21 +152,21 @@ function dirname(p) {
           class="input"
           type="text"
           placeholder="输入文件夹路径，例如 D:\project\my-app"
-          :disabled="loading"
+          :disabled="loading || !!killingPid"
           @keydown.enter="handleDetect"
         />
-        <button class="btn btn-secondary" :disabled="loading" @click="chooseFolder">
+        <button class="btn btn-secondary" :disabled="loading || !!killingPid" @click="chooseFolder">
           <IconFolderSearch /> 选择文件夹
         </button>
-        <button class="btn btn-secondary" :disabled="loading" @click="readCurrentFolder">
+        <button class="btn btn-secondary" :disabled="loading || !!killingPid" @click="readCurrentFolder">
           读取当前
         </button>
-        <button class="btn btn-primary" :disabled="loading || !folder.trim()" @click="handleDetect">
+        <button class="btn btn-primary" :disabled="loading || !!killingPid || !folder.trim()" @click="handleDetect">
           <IconLoading v-if="loading" class="spin" />
           检测占用
         </button>
       </div>
-      <p class="search-hint">检测基于进程的可执行文件路径与命令行匹配，可覆盖开发服务器、终端等常见占用场景</p>
+      <p class="search-hint">仅根据可执行文件路径和命令行推断；仅以此目录为工作目录或持有文件句柄的进程可能无法检测到。</p>
     </div>
 
     <div v-if="loading" class="skeleton-list">
@@ -159,12 +181,12 @@ function dirname(p) {
 
     <div v-else-if="detected && results.length === 0" class="empty-state" style="padding:48px">
       <IconFolderLockOpen class="empty-state-icon" />
-      <p class="empty-state-desc">未发现占用该目录的进程</p>
+      <p class="empty-state-desc">未检测到路径匹配的进程（不代表文件夹未被占用）</p>
     </div>
 
     <div v-else-if="results.length > 0" class="section">
       <div class="section-header">
-        <h3 class="sub-title">发现 {{ results.length }} 个占用进程</h3>
+        <h3 class="sub-title">发现 {{ results.length }} 个路径匹配的进程</h3>
       </div>
       <div class="result-list">
         <div v-for="proc in results" :key="proc.pid" class="result-card">

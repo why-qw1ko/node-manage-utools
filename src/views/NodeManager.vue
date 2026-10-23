@@ -53,7 +53,6 @@ const mirrorError = ref('');
 const filters = [
   { id: 'all', label: '全部' },
   { id: 'active', label: '当前使用' },
-  { id: 'lts', label: 'LTS' },
 ];
 
 function formatNodeVersion(value) {
@@ -70,18 +69,6 @@ const filteredInstalledVersions = computed(() => {
   }
   if (activeFilter.value === 'active') {
     list = list.filter((v) => v.active);
-  }
-  return list;
-});
-
-const filteredAvailableVersions = computed(() => {
-  let list = availableVersions.value;
-  if (searchQuery.value) {
-    const q = searchQuery.value.toLowerCase();
-    list = list.filter((v) => v.version.includes(q));
-  }
-  if (activeFilter.value === 'lts') {
-    list = list.filter((v) => v.lts);
   }
   return list;
 });
@@ -410,7 +397,7 @@ async function handleInstall() {
             <div v-else-if="installStatus === 'idle' && availableVersions.length" class="d-suggestions">
               <span class="d-sug-title">可用版本：</span>
               <div class="d-sug-list">
-                <button v-for="v in filteredAvailableVersions.slice(0,12)" :key="v.version"
+                <button v-for="v in availableVersions.slice(0,12)" :key="v.version"
                   class="btn btn-sm btn-ghost" @click="installInput = v.version">
                   {{ v.version }}<span v-if="v.lts" class="tag" style="margin-left:4px">{{ v.lts }}</span>
                 </button>

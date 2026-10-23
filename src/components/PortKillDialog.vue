@@ -24,17 +24,27 @@ const detected = ref(false);
 const results = ref([]);
 const error = ref('');
 const killingPid = ref(null);
+const detectedPort = ref('');
+let requestId = 0;
 
-function reset() {
-  port.value = '';
+function invalidateResults() {
+  requestId += 1;
   detecting.value = false;
   detected.value = false;
+  detectedPort.value = '';
   results.value = [];
   error.value = '';
-  killingPid.value = null;
+}
+
+watch(port, invalidateResults, { flush: 'sync' });
+
+function reset() {
+  invalidateResults();
+  port.value = '';
 }
 
 function close() {
+  reset();
   emit('update:modelValue', false);
 }
 
@@ -54,18 +64,20 @@ function dirname(p) {
 async function handleDetect() {
   const value = port.value.trim();
   if (!value) { showError('请输入端口号'); return; }
+  invalidateResults();
+  const currentRequest = requestId;
   detecting.value = true;
-  detected.value = false;
-  error.value = '';
-  results.value = [];
   try {
-    results.value = await detectPort(value);
+    const items = await detectPort(value);
+    if (currentRequest !== requestId || !props.modelValue) return;
+    results.value = items;
+    detectedPort.value = value;
     detected.value = true;
-    if (results.value.length === 0) showSuccess('该端口当前未被占用');
+    if (items.length === 0) showSuccess('该端口当前未被占用');
   } catch (err) {
-    error.value = err.message || '检测失败';
+    if (currentRequest === requestId && props.modelValue) error.value = err.message || '检测失败';
   } finally {
-    detecting.value = false;
+    if (currentRequest === requestId) detecting.value = false;
   }
 }
 
@@ -96,18 +108,24 @@ async function confirmKill(proc) {
 }
 
 async function handleKill(proc) {
+  const currentRequest = requestId;
+  const targetPort = detectedPort.value;
   const confirmed = await confirmKill(proc);
   if (!confirmed) return;
+  if (currentRequest !== requestId || !props.modelValue || !targetPort || port.value.trim() !== targetPort || !results.value.includes(proc)) {
+    showError('检测结果已过期，请重新检测');
+    return;
+  }
   killingPid.value = proc.pid;
   try {
-    await killPortProcess(port.value.trim(), proc.pid);
-    showSuccess(`已关闭进程 ${proc.pid}`);
+    await killPortProcess(targetPort, proc);
+    if (currentRequest === requestId && props.modelValue) showSuccess(`已关闭进程 ${proc.pid}`);
     emit('killed');
-    await handleDetect();
+    if (currentRequest === requestId && props.modelValue) await handleDetect();
   } catch (err) {
-    showError(`关闭失败: ${err.message}`);
+    if (currentRequest === requestId && props.modelValue) showError(`关闭失败: ${err.message}`);
   } finally {
-    killingPid.value = null;
+    if (killingPid.value === proc.pid) killingPid.value = null;
   }
 }
 
@@ -139,10 +157,10 @@ function levelTag(proc) {
               type="text"
               inputmode="numeric"
               placeholder="输入端口号，例如 8080"
-              :disabled="detecting"
+              :disabled="detecting || !!killingPid"
               @keydown.enter="handleDetect"
             />
-            <button class="btn btn-primary" :disabled="detecting || !port.trim()" @click="handleDetect">
+            <button class="btn btn-primary" :disabled="detecting || !!killingPid || !port.trim()" @click="handleDetect">
               <IconLoading v-if="detecting" class="spin" />
               <IconMagnify v-else />
               {{ detecting ? '检测中' : '检测' }}
@@ -150,7 +168,11 @@ function levelTag(proc) {
           </div>
           <p class="dialog-hint">自动检测占用该端口的进程及其运行目录、命令行等详细信息</p>
 
-          <div v-if="detecting" class="detect-state">
+          <div v-if="killingPid && !detected" class="detect-state">
+            <IconLoading class="spin" />
+            <span>正在终止进程 {{ killingPid }}，请稍候…</span>
+          </div>
+          <div v-else-if="detecting" class="detect-state">
             <IconLoading class="spin detect-spinner" />
             <span>正在检测端口占用…</span>
           </div>

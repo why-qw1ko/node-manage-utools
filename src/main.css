@@ -125,7 +125,7 @@ body {
   border-radius: var(--radius-md);
   font-size: 13px;
   font-weight: 500;
-  z-index: 2000;
+  z-index: 5000;
   box-shadow: var(--shadow-lg);
   transition: transform var(--transition-slow), opacity var(--transition-normal);
   pointer-events: none;

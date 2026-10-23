@@ -10,6 +10,9 @@ test('normalizePackageSpec accepts common package specifications', () => {
 test('normalizePackageSpec rejects shell fragments and unsupported sources', () => {
   assert.throws(() => normalizePackageSpec('typescript & whoami'), /包名格式无效/);
   assert.throws(() => normalizePackageSpec('https://example.com/pkg.tgz'), /包名格式无效/);
+  assert.throws(() => normalizePackageSpec('--force'), /包名格式无效/);
+  assert.throws(() => normalizePackageSpec('@-scope/package'), /包名格式无效/);
+  assert.throws(() => normalizePackageSpec('@scope/-package'), /包名格式无效/);
 });
 
 test('parseGlobalPackagesOutput validates and parses npm output', () => {

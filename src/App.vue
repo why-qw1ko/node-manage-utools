@@ -18,6 +18,8 @@ import { removeLegacyRegistryCache } from './utils/store.js';
 
 const activeTab = ref('node');
 const hasNvm = ref(false);
+let npmPrefixReady = Promise.resolve();
+let nvmReady = Promise.resolve();
 const views = {
   node: NodeManager,
   mirror: MirrorManager,
@@ -85,7 +87,7 @@ async function detectProjectVersion(dirPath) {
   }
 }
 
-function handlePluginEnter(action) {
+async function handlePluginEnter(action) {
   if (!action?.code) return;
 
   // Direct open: config file shortcuts
@@ -99,6 +101,7 @@ function handlePluginEnter(action) {
   };
   const fileId = directOpenMap[action.code];
   if (fileId) {
+    if (fileId === 'npm-global-dir') await npmPrefixReady;
     const file = getConfigFileById(fileId);
     if (file) { openPath(file.path); return; }
   }
@@ -116,6 +119,7 @@ function handlePluginEnter(action) {
   if (action.type === 'files' && action.payload?.length > 0) {
     const filePath = action.payload[0]?.path;
     if (filePath) {
+      await nvmReady;
       try {
         const dirPath = window.nodeAPI.fs.statSync(filePath).isDirectory()
           ? filePath
@@ -130,10 +134,12 @@ function handlePluginEnter(action) {
 
 onMounted(async () => {
   removeLegacyRegistryCache();
+  npmPrefixReady = initNpmPrefix();
+  nvmReady = checkNvm();
   if (window.utools?.onPluginEnter) {
     window.utools.onPluginEnter(handlePluginEnter);
   }
-  await Promise.all([initNpmPrefix(), checkNvm()]);
+  await Promise.all([npmPrefixReady, nvmReady]);
 });
 </script>
 
