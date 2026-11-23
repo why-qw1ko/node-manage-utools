@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, nextTick } from 'vue';
+import { computed, ref, watch, nextTick } from 'vue';
 import IconLanDisconnect from '~icons/mdi/lan-disconnect';
 import IconClose from '~icons/mdi/close';
 import IconMagnify from '~icons/mdi/magnify';
@@ -24,7 +24,9 @@ const detected = ref(false);
 const results = ref([]);
 const error = ref('');
 const killingPid = ref(null);
+const confirmingKill = ref(false);
 const detectedPort = ref('');
+const busy = computed(() => detecting.value || confirmingKill.value || !!killingPid.value);
 let requestId = 0;
 
 function invalidateResults() {
@@ -44,24 +46,38 @@ function reset() {
 }
 
 function close() {
+  if (killingPid.value) return;
   reset();
   emit('update:modelValue', false);
 }
 
 watch(() => props.modelValue, async (open) => {
+  reset();
   if (open) {
-    reset();
     await nextTick();
     portInput.value?.focus();
   }
 });
+
+function copyProcessDetails(text, message) {
+  if (copyToClipboard(text)) showSuccess(message);
+  else showError('复制失败');
+}
 
 function dirname(p) {
   if (!p) return '';
   try { return window.nodeAPI.path.dirname(p); } catch { return ''; }
 }
 
-async function handleDetect() {
+function openProcessDirectory(path) {
+  if (!openPath(dirname(path))) showError('无法打开进程所在目录');
+}
+
+function handleDetect() {
+  if (!busy.value) return detectCurrentPort();
+}
+
+async function detectCurrentPort() {
   const value = port.value.trim();
   if (!value) { showError('请输入端口号'); return; }
   invalidateResults();
@@ -73,7 +89,6 @@ async function handleDetect() {
     results.value = items;
     detectedPort.value = value;
     detected.value = true;
-    if (items.length === 0) showSuccess('该端口当前未被占用');
   } catch (err) {
     if (currentRequest === requestId && props.modelValue) error.value = err.message || '检测失败';
   } finally {
@@ -81,12 +96,12 @@ async function handleDetect() {
   }
 }
 
-async function confirmKill(proc) {
+async function confirmKill(proc, isCurrent) {
   const cls = classifyProcess(proc.name, proc.pid);
   if (cls.level === 'user') {
     return confirmAction({
       title: '终止进程',
-      message: `确定要强制终止进程 ${proc.name} (PID: ${proc.pid}) 吗？未保存的数据可能丢失。`,
+      message: `确定要强制终止监听 TCP ${detectedPort.value} 的 ${proc.name}（PID ${proc.pid}）吗？该进程的其他连接也会关闭，未保存的数据可能丢失。`,
       confirmText: '终止进程',
       danger: true,
     });
@@ -98,7 +113,7 @@ async function confirmKill(proc) {
     confirmText: '继续',
     danger: true,
   });
-  if (!first) return false;
+  if (!first || !isCurrent()) return false;
   return confirmAction({
     title: '最后确认',
     message: `即将强制终止 ${proc.name} (PID: ${proc.pid})。\n${cls.level === 'critical' ? '该进程为系统关键进程，关闭可能导致系统崩溃或蓝屏！' : '关闭后相关系统服务可能失效。'}\n\n请再次确认。`,
@@ -108,24 +123,34 @@ async function confirmKill(proc) {
 }
 
 async function handleKill(proc) {
+  if (busy.value || Number(proc.pid) <= 4) return;
   const currentRequest = requestId;
   const targetPort = detectedPort.value;
-  const confirmed = await confirmKill(proc);
+  const isCurrent = () => currentRequest === requestId && props.modelValue && targetPort
+    && port.value.trim() === targetPort && results.value.includes(proc);
+  if (!isCurrent()) return;
+  confirmingKill.value = true;
+  let confirmed;
+  try {
+    confirmed = await confirmKill(proc, isCurrent);
+  } finally {
+    confirmingKill.value = false;
+  }
   if (!confirmed) return;
-  if (currentRequest !== requestId || !props.modelValue || !targetPort || port.value.trim() !== targetPort || !results.value.includes(proc)) {
+  if (!isCurrent()) {
     showError('检测结果已过期，请重新检测');
     return;
   }
   killingPid.value = proc.pid;
   try {
     await killPortProcess(targetPort, proc);
-    if (currentRequest === requestId && props.modelValue) showSuccess(`已关闭进程 ${proc.pid}`);
+    if (isCurrent()) showSuccess(`已关闭进程 ${proc.pid}`);
     emit('killed');
-    if (currentRequest === requestId && props.modelValue) await handleDetect();
   } catch (err) {
-    if (currentRequest === requestId && props.modelValue) showError(`关闭失败: ${err.message}`);
+    if (isCurrent()) showError(`关闭失败: ${err.message}`);
   } finally {
-    if (killingPid.value === proc.pid) killingPid.value = null;
+    if (isCurrent()) await detectCurrentPort();
+    killingPid.value = null;
   }
 }
 
@@ -136,14 +161,14 @@ function levelTag(proc) {
 
 <template>
   <Teleport to="body">
-    <div v-if="modelValue" class="port-dialog-overlay" @click.self="close">
+    <div v-if="modelValue" class="port-dialog-overlay" @click.self="close" @keydown.esc="close">
       <div class="port-dialog" role="dialog" aria-modal="true" aria-label="按端口关闭进程">
         <div class="dialog-head">
           <div class="dialog-title">
             <IconLanDisconnect class="dialog-title-icon" />
             <span>按端口关闭进程</span>
           </div>
-          <button class="btn btn-ghost btn-icon btn-sm" aria-label="关闭" @click="close">
+          <button class="btn btn-ghost btn-icon btn-sm" aria-label="关闭" :disabled="!!killingPid" @click="close">
             <IconClose />
           </button>
         </div>
@@ -157,16 +182,16 @@ function levelTag(proc) {
               type="text"
               inputmode="numeric"
               placeholder="输入端口号，例如 8080"
-              :disabled="detecting || !!killingPid"
+              :disabled="busy"
               @keydown.enter="handleDetect"
             />
-            <button class="btn btn-primary" :disabled="detecting || !!killingPid || !port.trim()" @click="handleDetect">
+            <button class="btn btn-primary" :disabled="busy || !port.trim()" @click="handleDetect">
               <IconLoading v-if="detecting" class="spin" />
               <IconMagnify v-else />
               {{ detecting ? '检测中' : '检测' }}
             </button>
           </div>
-          <p class="dialog-hint">自动检测占用该端口的进程及其运行目录、命令行等详细信息</p>
+          <p class="dialog-hint">检测正在监听该 TCP 端口的进程，结果包含可读取的路径和命令行。</p>
 
           <div v-if="killingPid && !detected" class="detect-state">
             <IconLoading class="spin" />
@@ -183,7 +208,7 @@ function levelTag(proc) {
           </div>
 
           <div v-else-if="detected && results.length === 0" class="detect-state">
-            <span>该端口当前未被任何进程占用</span>
+            <span>未检测到该 TCP 端口的监听进程</span>
           </div>
 
           <div v-else-if="results.length > 0" class="result-list">
@@ -202,7 +227,8 @@ function levelTag(proc) {
                 </div>
                 <button
                   class="btn btn-sm btn-danger"
-                  :disabled="!!killingPid"
+                  :disabled="busy || Number(proc.pid) <= 4"
+                  :title="Number(proc.pid) <= 4 ? 'Windows 核心进程不可关闭' : undefined"
                   @click="handleKill(proc)"
                 >
                   <IconLoading v-if="killingPid === proc.pid" class="spin" />
@@ -226,10 +252,10 @@ function levelTag(proc) {
                   <dt>可执行文件</dt>
                   <dd>
                     <span class="detail-value mono" :title="proc.exe">{{ proc.exe || '未知' }}</span>
-                    <button v-if="proc.exe" class="btn btn-ghost btn-icon btn-sm" title="复制路径" @click="copyToClipboard(proc.exe); showSuccess('路径已复制')">
+                    <button v-if="proc.exe" class="btn btn-ghost btn-icon btn-sm" title="复制路径" @click="copyProcessDetails(proc.exe, '路径已复制')">
                       <IconContentCopy />
                     </button>
-                    <button v-if="dirname(proc.exe)" class="btn btn-ghost btn-icon btn-sm" title="打开所在目录" @click="openPath(dirname(proc.exe))">
+                    <button v-if="dirname(proc.exe)" class="btn btn-ghost btn-icon btn-sm" title="打开所在目录" @click="openProcessDirectory(proc.exe)">
                       <IconFolderOpenOutline />
                     </button>
                   </dd>
@@ -246,7 +272,7 @@ function levelTag(proc) {
                   <dt>命令行</dt>
                   <dd>
                     <span class="detail-value mono cmd">{{ proc.cmd }}</span>
-                    <button class="btn btn-ghost btn-icon btn-sm" title="复制命令行" @click="copyToClipboard(proc.cmd); showSuccess('命令行已复制')">
+                    <button class="btn btn-ghost btn-icon btn-sm" title="复制命令行" @click="copyProcessDetails(proc.cmd, '命令行已复制')">
                       <IconContentCopy />
                     </button>
                   </dd>

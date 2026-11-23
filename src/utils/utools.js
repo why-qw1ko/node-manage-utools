@@ -5,7 +5,7 @@
  */
 export function openPath(path) {
   try {
-    utools.shellOpenPath(path);
+    window.utools.shellOpenPath(path);
     return true;
   } catch {
     return false;
@@ -15,17 +15,28 @@ export function openPath(path) {
 /**
  * Open URL in default browser
  * @param {string} url
+ * @returns {boolean}
  */
 export function openExternal(url) {
-  utools.shellOpenExternal(url);
+  try {
+    window.utools.shellOpenExternal(url);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
  * Copy text to clipboard
  * @param {string} text
+ * @returns {boolean}
  */
 export function copyToClipboard(text) {
-  utools.copyToClipboard(text);
+  try {
+    return window.utools.copyText(text);
+  } catch {
+    return false;
+  }
 }
 
 /**

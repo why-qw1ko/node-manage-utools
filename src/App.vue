@@ -10,16 +10,20 @@ import ProcessManager from './views/ProcessManager.vue';
 import FolderUnlock from './views/FolderUnlock.vue';
 import DiskUsage from './views/DiskUsage.vue';
 import ConfirmDialog from './components/ConfirmDialog.vue';
-import { isNvmInstalled, useVersion } from './utils/nvm.js';
-import { openPath, showSuccess, showError } from './utils/utools.js';
-import { confirmAction } from './utils/confirm.js';
+import { isNvmInstalled, normalizeNodeVersion, useVersion } from './utils/nvm.js';
+import { openPath, showSuccess, showError, showWarning } from './utils/utools.js';
+import { confirmAction, settleConfirm } from './utils/confirm.js';
 import { getConfigFileById, initNpmPrefix } from './constants/files.js';
 import { removeLegacyRegistryCache } from './utils/store.js';
 
 const activeTab = ref('node');
-const hasNvm = ref(false);
-let npmPrefixReady = Promise.resolve();
-let nvmReady = Promise.resolve();
+const nvmStatus = ref('checking');
+const nvmError = ref('');
+const hasNvm = computed(() => nvmStatus.value === 'installed');
+const versionRefreshId = ref(0);
+const projectVersionFiles = ['.nvmrc', '.node-version'];
+const maxProjectVersionFileSize = 4096;
+let nvmReady = null;
 const views = {
   node: NodeManager,
   mirror: MirrorManager,
@@ -31,64 +35,101 @@ const views = {
   disk: DiskUsage,
 };
 const activeView = computed(() => views[activeTab.value] || NodeManager);
-const activeViewProps = computed(() => (
-  ['node', 'config'].includes(activeTab.value) ? { hasNvm: hasNvm.value } : {}
-));
+const activeViewProps = computed(() => {
+  if (activeTab.value === 'node') {
+    return {
+      hasNvm: hasNvm.value,
+      nvmStatus: nvmStatus.value,
+      nvmError: nvmError.value,
+      versionRefreshId: versionRefreshId.value,
+      onRecheckNvm: refreshNvm,
+    };
+  }
+  return activeTab.value === 'config' ? { hasNvm: hasNvm.value } : {};
+});
 
 async function checkNvm() {
-  try { hasNvm.value = await isNvmInstalled(); } catch { /* */ }
+  if (nvmStatus.value !== 'installed') nvmStatus.value = 'checking';
+  nvmError.value = '';
+  try {
+    const platform = window.nodeAPI?.os?.platform();
+    if (platform && platform !== 'win32') {
+      nvmStatus.value = 'unsupported';
+      return;
+    }
+    nvmStatus.value = await isNvmInstalled() ? 'installed' : 'missing';
+  } catch (error) {
+    nvmError.value = error.message || '检测失败，请重试。';
+    nvmStatus.value = 'error';
+  }
 }
 
-/**
- * Detect .nvmrc or .node-version in project directory
- * @param {string} dirPath
- */
-async function detectProjectVersion(dirPath) {
-  if (!hasNvm.value || !dirPath) return;
-  const fs = window.nodeAPI.fs;
-  const path = window.nodeAPI.path;
-  let version = null;
-  let source = null;
+function refreshNvm() {
+  nvmReady ??= checkNvm().finally(() => { nvmReady = null; });
+  return nvmReady;
+}
 
-  // Check .nvmrc
-  const nvmrcPath = path.join(dirPath, '.nvmrc');
-  if (fs.existsSync(nvmrcPath)) {
+function readProjectVersion(dirPath) {
+  const { fs, path } = window.nodeAPI;
+  if (typeof fs.readSmallTextFileSync !== 'function') {
+    throw new Error('无法读取项目版本声明。请重新加载插件后重试。');
+  }
+  for (const source of projectVersionFiles) {
+    let content;
     try {
-      version = fs.readFileSync(nvmrcPath, 'utf-8').trim();
-      source = '.nvmrc';
-    } catch { /* */ }
-  }
-
-  // Check .node-version if no .nvmrc
-  if (!version) {
-    const nodeVersionPath = path.join(dirPath, '.node-version');
-    if (fs.existsSync(nodeVersionPath)) {
-      try {
-        version = fs.readFileSync(nodeVersionPath, 'utf-8').trim();
-        source = '.node-version';
-      } catch { /* */ }
-    }
-  }
-
-  if (version && source) {
-    const shouldSwitch = await confirmAction({
-      title: '切换 Node.js 版本',
-      message: `检测到 ${source} 文件要求使用 Node.js v${version}，是否切换？`,
-      confirmText: '切换版本',
-    });
-    if (shouldSwitch) {
-      try {
-        await useVersion(version);
-        showSuccess(`已切换到 Node.js v${version}`);
-      } catch (err) {
-        showError(`切换失败: ${err.message}`);
+      content = fs.readSmallTextFileSync(path.join(dirPath, source), maxProjectVersionFileSize);
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      if (error.code === 'EFBIG') throw new Error(`${source} 超过 4 KB，请检查版本文件。`);
+      if (error.code === 'EINVAL' || error.code === 'EILSEQ') {
+        throw new Error(`${source} 必须是普通的 UTF-8 文本文件。`);
       }
+      throw new Error(`无法读取 ${source}，请检查文件权限后重试。`);
     }
+    try {
+      return { version: normalizeNodeVersion(content), source };
+    } catch {
+      throw new Error(`${source} 中的 Node.js 版本格式无效，例如可填写 22.14.0 或 lts。`);
+    }
+  }
+  return null;
+}
+
+async function detectProjectVersion(dirPath) {
+  let declaration;
+  try {
+    declaration = readProjectVersion(dirPath);
+  } catch (error) {
+    showError(error.message);
+    return;
+  }
+  if (!declaration) {
+    showWarning('项目中未找到 .nvmrc 或 .node-version');
+    return;
+  }
+
+  const { source, version } = declaration;
+  const versionLabel = /^\d/.test(version) ? `v${version}` : version;
+  const shouldSwitch = await confirmAction({
+    title: '切换 Node.js 版本',
+    message: `项目中的 ${source} 请求使用 Node.js ${versionLabel}。切换会更改 NVM 当前版本。`,
+    confirmText: '切换版本',
+  });
+  if (!shouldSwitch) return;
+
+  try {
+    await useVersion(version);
+    showSuccess(`已切换到 Node.js ${versionLabel}`);
+  } catch (error) {
+    showError(`切换失败。${error.message}`);
+  } finally {
+    versionRefreshId.value += 1;
   }
 }
 
 async function handlePluginEnter(action) {
   if (!action?.code) return;
+  const nvmCheck = refreshNvm();
 
   // Direct open: config file shortcuts
   const directOpenMap = {
@@ -101,9 +142,32 @@ async function handlePluginEnter(action) {
   };
   const fileId = directOpenMap[action.code];
   if (fileId) {
-    if (fileId === 'npm-global-dir') await npmPrefixReady;
-    const file = getConfigFileById(fileId);
-    if (file) { openPath(file.path); return; }
+    if (fileId === 'nvm-dir') {
+      await nvmCheck;
+      if (!hasNvm.value) {
+        activeTab.value = 'node';
+        return;
+      }
+    }
+    try {
+      if (fileId === 'npm-global-dir') await initNpmPrefix();
+      const file = getConfigFileById(fileId);
+      if (!file || !window.nodeAPI.fs.existsSync(file.path)) {
+        activeTab.value = 'config';
+        showError(`找不到${file?.name || '目标路径'}`);
+      } else {
+        const stats = window.nodeAPI.fs.statSync(file.path);
+        const expectedType = file.type === 'directory' ? stats.isDirectory() : stats.isFile();
+        if (!expectedType || !openPath(file.path)) {
+          activeTab.value = 'config';
+          showError(`无法打开${file.name}，可在配置文件页核对并复制路径`);
+        }
+      }
+    } catch {
+      activeTab.value = 'config';
+      showError('无法打开目标路径');
+    }
+    return;
   }
 
   // Tab navigation
@@ -119,12 +183,13 @@ async function handlePluginEnter(action) {
   if (action.type === 'files' && action.payload?.length > 0) {
     const filePath = action.payload[0]?.path;
     if (filePath) {
-      await nvmReady;
+      await nvmCheck;
+      if (!hasNvm.value) return;
       try {
         const dirPath = window.nodeAPI.fs.statSync(filePath).isDirectory()
           ? filePath
           : window.nodeAPI.path.dirname(filePath);
-        detectProjectVersion(dirPath);
+        await detectProjectVersion(dirPath);
       } catch {
         showError('无法读取项目路径');
       }
@@ -132,20 +197,17 @@ async function handlePluginEnter(action) {
   }
 }
 
-onMounted(async () => {
+onMounted(() => {
   removeLegacyRegistryCache();
-  npmPrefixReady = initNpmPrefix();
-  nvmReady = checkNvm();
-  if (window.utools?.onPluginEnter) {
-    window.utools.onPluginEnter(handlePluginEnter);
-  }
-  await Promise.all([npmPrefixReady, nvmReady]);
+  refreshNvm();
+  window.utools?.onPluginEnter?.(handlePluginEnter);
+  window.utools?.onPluginOut?.(() => settleConfirm(false));
 });
 </script>
 
 <template>
   <div class="app-layout">
-    <Sidebar :active-tab="activeTab" :has-nvm="hasNvm" @change="(t) => activeTab = t" />
+    <Sidebar :active-tab="activeTab" @change="(t) => activeTab = t" />
     <main class="app-main">
       <KeepAlive>
         <component :is="activeView" v-bind="activeViewProps" />

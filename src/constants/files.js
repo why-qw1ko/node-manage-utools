@@ -1,4 +1,4 @@
-import { execFileCommand, getNpmExecutable } from '../utils/command.js';
+import { getNpmPrefix as readNpmPrefix } from '../utils/npm.js';
 
 // Get home directory
 function getHome() {
@@ -8,34 +8,27 @@ function getHome() {
 // Cache for npm prefix
 let npmPrefixCache = null;
 
-// Get npm global prefix (cached)
-function getNpmPrefix() {
-  if (npmPrefixCache) return npmPrefixCache;
-  try {
-    // This will be populated on first access
-    npmPrefixCache = window.nodeAPI.path.join(getHome(), 'AppData', 'Roaming', 'npm');
-    return npmPrefixCache;
-  } catch {
-    return getHome();
-  }
+function getDefaultNpmPrefix() {
+  return window.nodeAPI.os.platform() === 'win32'
+    ? window.nodeAPI.path.join(getHome(), 'AppData', 'Roaming', 'npm')
+    : '/usr/local';
 }
 
-// Initialize npm prefix (call once)
 export async function initNpmPrefix() {
   try {
-    const prefix = await execFileCommand(getNpmExecutable(), ['prefix', '-g']);
-    npmPrefixCache = prefix.trim();
+    npmPrefixCache = await readNpmPrefix();
   } catch {
-    npmPrefixCache = window.nodeAPI.path.join(getHome(), 'AppData', 'Roaming', 'npm');
+    npmPrefixCache = null;
   }
 }
 
 // Configuration file paths
-export function getConfigFiles() {
+export function getConfigFiles({ globalConfig, cacheDir } = {}) {
   const home = getHome();
   const platform = window.nodeAPI.os.platform();
-  const nvmHome = window.nodeAPI.env.NVM_HOME;
+  const nvmHome = window.nodeAPI.nvm?.getInstallDir?.() ?? window.nodeAPI.env.NVM_HOME;
   const windir = window.nodeAPI.env.WINDIR;
+  const npmPrefix = npmPrefixCache || getDefaultNpmPrefix();
 
   return [
     {
@@ -51,7 +44,7 @@ export function getConfigFiles() {
       name: '.npmrc (全局)',
       description: '全局 npm 配置文件',
       icon: 'mdi:file-cog-outline',
-      path: window.nodeAPI.path.join(getNpmPrefix(), 'etc', '.npmrc'),
+      path: globalConfig || window.nodeAPI.path.join(npmPrefix, 'etc', 'npmrc'),
       type: 'file',
     },
     {
@@ -86,7 +79,9 @@ export function getConfigFiles() {
       name: 'npm 全局目录',
       description: 'npm 全局包安装目录',
       icon: 'mdi:folder-open-outline',
-      path: window.nodeAPI.path.join(getNpmPrefix(), 'node_modules'),
+      path: platform === 'win32'
+        ? window.nodeAPI.path.join(npmPrefix, 'node_modules')
+        : window.nodeAPI.path.join(npmPrefix, 'lib', 'node_modules'),
       type: 'directory',
     },
     {
@@ -94,7 +89,9 @@ export function getConfigFiles() {
       name: 'npm 缓存目录',
       description: 'npm 缓存目录',
       icon: 'mdi:cached',
-      path: window.nodeAPI.path.join(home, 'AppData', 'Local', 'npm-cache'),
+      path: cacheDir || (platform === 'win32'
+        ? window.nodeAPI.path.join(home, 'AppData', 'Local', 'npm-cache')
+        : window.nodeAPI.path.join(home, '.npm')),
       type: 'directory',
     },
     {
@@ -102,7 +99,7 @@ export function getConfigFiles() {
       name: 'nvm 安装目录',
       description: 'nvm-windows 安装目录',
       icon: 'mdi:folder-cog-outline',
-      path: nvmHome || window.nodeAPI.path.join(home, 'AppData', 'Roaming', 'nvm'),
+      path: nvmHome || '',
       type: 'directory',
       requireNvm: true,
     },

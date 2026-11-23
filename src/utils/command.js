@@ -1,3 +1,22 @@
+let localMutationInProgress = false;
+
+export function beginLocalMutation() {
+  if (localMutationInProgress) {
+    throw new Error('另一个 Node.js 或 npm 操作正在修改本地环境，请等待完成后重试');
+  }
+  localMutationInProgress = true;
+  return () => { localMutationInProgress = false; };
+}
+
+export async function withLocalMutation(operation) {
+  const finish = beginLocalMutation();
+  try {
+    return await operation();
+  } finally {
+    finish();
+  }
+}
+
 /**
  * Execute a program without invoking a shell and return stdout
  * Uses nodeAPI from preload.js

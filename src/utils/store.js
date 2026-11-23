@@ -32,9 +32,8 @@ export function setStore(key, value) {
       ...(existing?._rev ? { _rev: existing._rev } : {}),
     };
     const result = window.utools.db.put(doc);
-    return result?.ok !== false;
-  } catch (err) {
-    console.error('Failed to save store:', err);
+    return result?.ok === true;
+  } catch {
     return false;
   }
 }

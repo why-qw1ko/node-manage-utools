@@ -175,8 +175,9 @@ dist/
 所有 Node.js API（child_process、fs、path、os）通过 `preload/services.js` 注入到 `window.nodeAPI`，渲染进程不直接使用 `require`。preload 目录下 `package.json` 声明 `"type": "commonjs"` 以确保 CJS 模块正常加载。
 
 ### nvm-windows
-- 插件通过 `NVM_HOME` 环境变量检测 nvm-windows 是否安装
-- 未安装时不提供版本管理功能，镜像源和配置文件功能不受影响
+- 插件通过 `NVM_HOME`、`PATH` 和 Windows 默认安装目录检测 nvm-windows。
+- 未安装时可从「Node 版本」打开官方发布页，下载并运行 `nvm-setup.exe`。安装后回到插件点击「重新检测」。自定义安装路径在 Windows 更新环境变量后需要重新启动 uTools 才能生效。
+- npm 镜像源和全局包管理也支持独立安装的 Node.js。
 
 ### 数据持久化
 - 自定义镜像源通过 `utools.db` 存储，键前缀 `node-manager:`
@@ -187,6 +188,14 @@ dist/
 - 读取安装源时只读取 `settings.txt`，不会调用 NVM 配置命令
 - 切换安装源时仅更新 `node_mirror` 或 `npm_mirror`
 - 写入前创建 `.mirror-backup` 备份，并校验 `root` 未发生变化
+- 如需恢复上一次写入前的配置，可先核对 NVM 安装目录中的 `settings.txt.mirror-backup`，再用它恢复 `settings.txt`。
+
+### 操作确认与失败恢复
+
+- 全局包操作会显示 npm 全局目录，安装或更新前会提示 npm 可能运行软件包的安装脚本。切换到 HTTP 镜像也需要确认。
+- 终止进程会复查 PID、创建时间和进程名。端口检测只检查 TCP 监听，文件夹检测根据路径和命令行推断。权限不足或检测超时时应重新检测。
+- 清理 npm 缓存前显示生效目录，确认后若发现目录变化则停止清理。扫描不完整时，页面会给出已读取空间的下限。
+- 版本操作超时或结果无法验证时，先刷新查看实际状态，再决定是否重试。
 
 ### 图标
 使用 `unplugin-icons` 在构建时将 `@iconify-json/mdi` 和 `@iconify-json/logos` 中的图标编译为 inline SVG 组件，运行时无外部网络请求。

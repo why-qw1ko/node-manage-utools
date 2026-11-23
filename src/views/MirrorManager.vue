@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onActivated } from 'vue';
 import IconSwapHorizontal from '~icons/mdi/swap-horizontal';
 import IconRefresh from '~icons/mdi/refresh';
 import IconPlus from '~icons/mdi/plus';
@@ -8,7 +8,7 @@ import IconContentCopy from '~icons/mdi/content-copy';
 import IconWeb from '~icons/mdi/web';
 import MirrorCard from '../components/MirrorCard.vue';
 import { BUILTIN_MIRRORS } from '../constants/mirrors.js';
-import { getCurrentRegistry, setRegistry } from '../utils/npm.js';
+import { getCurrentRegistry, normalizeRegistry, setRegistry } from '../utils/npm.js';
 import { getCustomMirrors, setCustomMirrors } from '../utils/store.js';
 import { showSuccess, showError, showWarning, copyToClipboard } from '../utils/utools.js';
 import { confirmAction } from '../utils/confirm.js';
@@ -22,9 +22,11 @@ const showAddDialog = ref(false);
 const newMirrorName = ref('');
 const newMirrorUrl = ref('');
 
+const registryBusy = computed(() => registryLoading.value || !!switchingRegistry.value);
 const allMirrors = computed(() => [...BUILTIN_MIRRORS, ...customMirrors.value]);
 
 async function loadCurrentRegistry(silent = false) {
+  if (registryBusy.value) return;
   registryLoading.value = true;
   registryError.value = '';
   try {
@@ -41,49 +43,59 @@ async function loadCurrentRegistry(silent = false) {
 function loadCustomMirrors() {
   try {
     const saved = getCustomMirrors();
-    customMirrors.value = Array.isArray(saved)
-      ? saved.filter((mirror) => {
-        try {
-          const parsed = new URL(mirror?.registry);
-          return typeof mirror?.name === 'string'
-            && mirror.name.length <= 40
-            && mirror.registry.length <= 2048
-            && !parsed.username
-            && !parsed.password
-            && ['http:', 'https:'].includes(parsed.protocol);
-        } catch {
-          return false;
-        }
-      })
-      : [];
+    const seen = new Set(BUILTIN_MIRRORS.map(({ registry }) => registry));
+    customMirrors.value = [];
+    if (!Array.isArray(saved)) return;
+    for (const mirror of saved) {
+      if (typeof mirror?.name !== 'string' || typeof mirror.registry !== 'string') continue;
+      if (!mirror.name.trim() || mirror.name.length > 40 || mirror.registry.length > 2048) continue;
+      try {
+        const registry = normalizeRegistry(mirror.registry);
+        if (seen.has(registry)) continue;
+        seen.add(registry);
+        customMirrors.value.push({ name: mirror.name, registry, icon: 'web', iconSet: 'mdi', custom: true });
+      } catch { /* 忽略无效的历史地址 */ }
+    }
   } catch {
     customMirrors.value = [];
   }
 }
 
 async function handleSelect(registry) {
+  if (registryBusy.value) return;
   switchingRegistry.value = registry;
   try {
-    await setRegistry(registry);
-    currentRegistry.value = registry;
+    if (registry.startsWith('http:')) {
+      const confirmed = await confirmAction({
+        title: '切换到未加密的 npm 镜像',
+        message: `${registry}\n\nHTTP 无法保护下载内容和发送到镜像的凭据。请确认该地址属于你信任的网络。`,
+        confirmText: '仍然切换',
+        danger: true,
+      });
+      if (!confirmed) return;
+    }
+    currentRegistry.value = await setRegistry(registry);
+    registryError.value = '';
     showSuccess('镜像源已切换');
   } catch (err) {
-    showError(`切换失败: ${err.message}`);
+    currentRegistry.value = await getCurrentRegistry().catch(() => '');
+    registryError.value = err.message || '镜像切换失败，请刷新确认';
+    showError(registryError.value);
   } finally {
     switchingRegistry.value = '';
   }
 }
 
 function handleCopy(registry) {
-  copyToClipboard(registry);
-  showSuccess('已复制到剪贴板');
+  if (copyToClipboard(registry)) showSuccess('已复制到剪贴板');
+  else showError('复制镜像源地址失败');
 }
 
 async function handleDelete(registry) {
   const mirror = customMirrors.value.find((item) => item.registry === registry);
   const confirmed = await confirmAction({
     title: '删除自定义镜像',
-    message: `确定要删除“${mirror?.name || registry}”吗？`,
+    message: `确定要删除“${mirror?.name || registry}”吗？此操作只移除插件中的条目，npm 当前配置仍会使用已选镜像。`,
     confirmText: '删除',
     danger: true,
   });
@@ -116,11 +128,9 @@ function handleAdd() {
   if (!name || !url) { showWarning('请填写完整信息'); return; }
   let normalizedUrl;
   try {
-    const parsed = new URL(url);
-    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error();
-    normalizedUrl = parsed.href;
-  } catch {
-    showWarning('请输入有效的 HTTP/HTTPS 地址');
+    normalizedUrl = normalizeRegistry(url);
+  } catch (error) {
+    showWarning(error instanceof TypeError ? '请输入有效的 HTTP/HTTPS 地址' : error.message);
     return;
   }
   if (name.length > 40 || normalizedUrl.length > 2048) { showWarning('名称或地址过长'); return; }
@@ -138,8 +148,8 @@ function handleAdd() {
   showSuccess('已添加自定义镜像源');
 }
 
-onMounted(() => {
-  loadCurrentRegistry(true); // silent on initial load
+onActivated(() => {
+  loadCurrentRegistry(true);
   loadCustomMirrors();
 });
 </script>
@@ -149,7 +159,7 @@ onMounted(() => {
     <div class="section">
       <div class="section-header">
         <h2 class="section-title"><IconSwapHorizontal class="section-icon" /> 当前镜像源</h2>
-        <button class="btn btn-sm btn-secondary" :disabled="registryLoading || !!switchingRegistry" @click="loadCurrentRegistry()">
+        <button class="btn btn-sm btn-secondary" :disabled="registryBusy" @click="loadCurrentRegistry()">
           <IconRefresh :class="{ spin: registryLoading }" /> {{ registryLoading ? '刷新中' : '刷新' }}
         </button>
       </div>
@@ -167,7 +177,7 @@ onMounted(() => {
       </div>
       <div v-if="registryError" class="registry-error">
         <span>{{ registryError }}</span>
-        <button class="btn btn-sm btn-ghost" @click="loadCurrentRegistry()">重试</button>
+        <button class="btn btn-sm btn-ghost" :disabled="registryBusy" @click="loadCurrentRegistry()">重试</button>
       </div>
     </div>
 
@@ -182,7 +192,7 @@ onMounted(() => {
           :name="m.name" :registry="m.registry" :icon="m.icon" :icon-set="m.iconSet"
           :custom="m.custom" :active="currentRegistry === m.registry"
           :loading="switchingRegistry === m.registry"
-          :disabled="!!switchingRegistry"
+          :disabled="registryBusy"
           @select="handleSelect" @copy="handleCopy" @delete="handleDelete"
         />
       </div>

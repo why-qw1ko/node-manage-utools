@@ -5,14 +5,16 @@ import IconClose from '~icons/mdi/close';
 import { confirmState, settleConfirm } from '../utils/confirm.js';
 
 const confirmButton = ref(null);
+const cancelButton = ref(null);
 const dialog = ref(null);
 let previousFocus = null;
 
-watch(() => confirmState.open, async (open) => {
+watch(() => [confirmState.open, confirmState.title, confirmState.message, confirmState.danger], async ([open], [wasOpen]) => {
   if (open) {
-    previousFocus = document.activeElement;
+    if (!wasOpen) previousFocus = document.activeElement;
     await nextTick();
-    confirmButton.value?.focus();
+    const defaultButton = confirmState.danger ? cancelButton.value : confirmButton.value;
+    defaultButton?.focus();
   } else {
     previousFocus?.focus?.();
     previousFocus = null;
@@ -70,7 +72,7 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown));
           </div>
           <p id="confirm-dialog-message">{{ confirmState.message }}</p>
           <div class="confirm-actions">
-            <button class="btn btn-secondary" @click="settleConfirm(false)">
+            <button ref="cancelButton" class="btn btn-secondary" @click="settleConfirm(false)">
               {{ confirmState.cancelText }}
             </button>
             <button
@@ -97,6 +99,6 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown));
 .confirm-content { flex: 1; min-width: 0; }
 .confirm-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
 .confirm-head h3 { font-size: 15px; color: var(--text); }
-.confirm-content p { color: var(--text-secondary); font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
+.confirm-content p { color: var(--text-secondary); font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 </style>

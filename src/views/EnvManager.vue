@@ -1,9 +1,10 @@
 <script setup>
-import { ref, onMounted } from 'vue';
+import { ref, onActivated } from 'vue';
 import IconEarth from '~icons/mdi/earth';
 import IconRefresh from '~icons/mdi/refresh';
 import EnvCard from '../components/EnvCard.vue';
 import { getNpmConfig } from '../utils/npm.js';
+import { redactCredentials } from '../utils/credentials.js';
 import { copyToClipboard, showSuccess, showError } from '../utils/utools.js';
 
 const envVars = ref([]);
@@ -32,10 +33,16 @@ const NPM_CONFIG_KEYS = [
 ];
 
 function loadEnvVars(silent = false) {
-  envVars.value = ENV_DEFINITIONS.map((def) => ({
-    ...def,
-    value: window.nodeAPI.env?.[def.name] || '',
-  })).filter((v) => v.value);
+  const environment = window.nodeAPI?.env;
+  envVars.value = ENV_DEFINITIONS.map((def) => {
+    const value = environment?.[def.name] || '';
+    return {
+      ...def,
+      value: def.name.endsWith('_PROXY')
+        ? redactCredentials(value).replace(/^[^\s/@]+@/, '[已隐藏]@')
+        : value,
+    };
+  }).filter((v) => v.value);
   if (!silent) showSuccess('环境变量已刷新');
 }
 
@@ -43,7 +50,7 @@ async function loadNpmVars(silent = false) {
   loading.value = true;
   npmError.value = '';
   try {
-    const configStr = await getNpmConfig();
+    const configStr = await getNpmConfig({ includeDefaults: true });
     const config = {};
     const lines = configStr.split('\n');
     for (const line of lines) {
@@ -69,22 +76,26 @@ async function loadNpmVars(silent = false) {
 }
 
 function handleCopy(value) {
-  copyToClipboard(value);
-  showSuccess('已复制到剪贴板');
+  if (copyToClipboard(value)) showSuccess('已复制到剪贴板');
+  else showError('复制失败');
 }
 
 async function refreshAll(silent = false) {
+  if (refreshing.value) return;
   refreshing.value = true;
   try {
     loadEnvVars(true);
     await loadNpmVars(true);
-    if (!silent) showSuccess('环境变量与 npm 配置已刷新');
+    if (!silent) {
+      if (npmError.value) showError('环境变量已刷新，npm 配置读取失败');
+      else showSuccess('环境变量与 npm 配置已刷新');
+    }
   } finally {
     refreshing.value = false;
   }
 }
 
-onMounted(() => refreshAll(true));
+onActivated(() => refreshAll(true));
 </script>
 
 <template>
@@ -96,7 +107,7 @@ onMounted(() => refreshAll(true));
           <IconRefresh :class="{ spin: refreshing }" /> {{ refreshing ? '刷新中' : '刷新' }}
         </button>
       </div>
-      <p class="section-desc">查看 Node.js 和 npm 相关的环境变量配置</p>
+      <p class="section-desc">显示 uTools 当前进程的环境变量。系统设置修改后请重新启动 uTools。</p>
     </div>
 
     <div class="section">

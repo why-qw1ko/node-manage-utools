@@ -1,3 +1,6 @@
+import { withLocalMutation } from './command.js';
+import { redactCredentials } from './credentials.js';
+
 function normalizeMirrorUrl(url) {
   const raw = String(url || '').trim();
   if (!raw || raw.length > 2048) throw new Error('安装源地址无效');
@@ -15,7 +18,7 @@ function normalizeMirrorUrl(url) {
  */
 export async function getNodeMirror() {
   const settings = window.nodeAPI.nvm?.getSettings?.() || {};
-  return settings.node_mirror || 'https://nodejs.org/dist/';
+  return redactCredentials(settings.node_mirror) || 'https://nodejs.org/dist/';
 }
 
 /**
@@ -24,7 +27,7 @@ export async function getNodeMirror() {
  */
 export async function getNpmMirror() {
   const settings = window.nodeAPI.nvm?.getSettings?.() || {};
-  return settings.npm_mirror || 'https://github.com/npm/cli/archive/';
+  return redactCredentials(settings.npm_mirror) || 'https://github.com/npm/cli/archive/';
 }
 
 /**
@@ -33,7 +36,7 @@ export async function getNpmMirror() {
  * @returns {Promise<string>}
  */
 export async function setNodeMirror(url) {
-  return window.nodeAPI.nvm.setMirror('node_mirror', normalizeMirrorUrl(url));
+  return withLocalMutation(() => window.nodeAPI.nvm.setMirror('node_mirror', normalizeMirrorUrl(url)));
 }
 
 /**
@@ -42,7 +45,14 @@ export async function setNodeMirror(url) {
  * @returns {Promise<string>}
  */
 export async function setNpmMirror(url) {
-  return window.nodeAPI.nvm.setMirror('npm_mirror', normalizeMirrorUrl(url));
+  return withLocalMutation(() => window.nodeAPI.nvm.setMirror('npm_mirror', normalizeMirrorUrl(url)));
+}
+
+export async function applyMirrorPreset({ node, npm }) {
+  return withLocalMutation(() => window.nodeAPI.nvm.setMirrors({
+    node_mirror: normalizeMirrorUrl(node),
+    npm_mirror: normalizeMirrorUrl(npm),
+  }));
 }
 
 // Preset mirror configurations

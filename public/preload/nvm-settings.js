@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 const MIRROR_KEYS = new Set(['node_mirror', 'npm_mirror']);
+const MAX_SETTINGS_BYTES = 64 * 1024;
 
 function parseSettingsText(text) {
   return Object.fromEntries(
@@ -15,10 +16,44 @@ function parseSettingsText(text) {
 
 function readSettingsFile(settingsPath) {
   try {
-    return parseSettingsText(fs.readFileSync(settingsPath, 'utf-8'));
-  } catch {
-    return {};
+    return parseSettingsText(decodeSettingsText(readSettingsSnapshot(settingsPath).bytes));
+  } catch (error) {
+    if (error.code === 'ENOENT') return {};
+    throw error;
   }
+}
+
+function readSettingsSnapshot(settingsPath) {
+  const info = fs.lstatSync(settingsPath);
+  if (!info.isFile()) throw new Error('NVM settings.txt 必须是普通文件，不能是链接。');
+  const fd = fs.openSync(settingsPath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+  try {
+    const stats = fs.fstatSync(fd);
+    if (!stats.isFile() || stats.ino !== info.ino || stats.dev !== info.dev) {
+      throw new Error('NVM settings.txt 已被其他程序替换，请刷新后重试。');
+    }
+    if (stats.size > MAX_SETTINGS_BYTES) throw new Error('NVM settings.txt 超过 64 KiB。');
+
+    const buffer = Buffer.alloc(stats.size + 1);
+    let used = 0;
+    while (used < buffer.length) {
+      const count = fs.readSync(fd, buffer, used, buffer.length - used, null);
+      if (!count) break;
+      used += count;
+    }
+    if (used !== stats.size) throw new Error('NVM settings.txt 已被其他程序更新，请刷新后重试。');
+    return { bytes: buffer.subarray(0, used), mode: stats.mode };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function decodeSettingsText(bytes) {
+  const text = bytes.toString('utf8');
+  if (text.includes('\0') || !Buffer.from(text, 'utf8').equals(bytes)) {
+    throw new Error('NVM settings.txt 不是有效的 UTF-8 文本。请先备份并转换文件编码。');
+  }
+  return text;
 }
 
 function normalizeMirrorUrl(url) {
@@ -54,38 +89,62 @@ function updateSettingsText(text, key, value) {
 }
 
 function updateMirrorSetting(settingsPath, key, url) {
-  if (!MIRROR_KEYS.has(key)) throw new Error('不允许修改该 NVM 配置项');
-  if (!fs.existsSync(settingsPath)) throw new Error('未找到 NVM settings.txt');
+  return updateMirrorSettings(settingsPath, { [key]: url });
+}
 
-  const normalizedUrl = normalizeMirrorUrl(url);
-  const originalText = fs.readFileSync(settingsPath, 'utf-8');
+function updateMirrorSettings(settingsPath, mirrors) {
+  if (!mirrors || typeof mirrors !== 'object' || Array.isArray(mirrors)) {
+    throw new Error('安装源配置无效');
+  }
+
+  const updates = Object.entries(mirrors).map(([key, url]) => {
+    if (!MIRROR_KEYS.has(key)) throw new Error('不允许修改该 NVM 配置项');
+    return [key, normalizeMirrorUrl(url)];
+  });
+  if (updates.length === 0) throw new Error('安装源配置无效');
+
+  let snapshot;
+  try {
+    snapshot = readSettingsSnapshot(settingsPath);
+  } catch (error) {
+    if (error.code === 'ENOENT') throw new Error('未找到 NVM settings.txt');
+    throw error;
+  }
+  const { bytes: original, mode } = snapshot;
+  const originalText = decodeSettingsText(original);
   const originalSettings = parseSettingsText(originalText);
-  const updatedText = updateSettingsText(originalText, key, normalizedUrl);
+  const updatedText = updates.reduce(
+    (text, [key, url]) => updateSettingsText(text, key, url),
+    originalText,
+  );
   const updatedSettings = parseSettingsText(updatedText);
 
   if (originalSettings.root !== updatedSettings.root) {
     throw new Error('安全检查失败：NVM root 将发生变化');
   }
+  if (originalText === updatedText) return updatedSettings;
 
   const backupPath = `${settingsPath}.mirror-backup`;
-  const tempPath = path.join(
-    path.dirname(settingsPath),
-    `.settings-${process.pid}-${Date.now()}.tmp`,
-  );
+  const tempDir = fs.mkdtempSync(path.join(path.dirname(settingsPath), '.settings-'));
+  const tempSettingsPath = path.join(tempDir, 'settings.txt');
+  const tempBackupPath = path.join(tempDir, 'settings.txt.mirror-backup');
 
-  fs.copyFileSync(settingsPath, backupPath);
   try {
-    fs.writeFileSync(tempPath, updatedText, {
-      encoding: 'utf-8',
-      flag: 'wx',
-      mode: fs.statSync(settingsPath).mode,
-    });
-    fs.renameSync(tempPath, settingsPath);
+    fs.writeFileSync(tempSettingsPath, updatedText, { encoding: 'utf-8', flag: 'wx', mode });
+    fs.writeFileSync(tempBackupPath, original, { flag: 'wx', mode });
+    if (!readSettingsSnapshot(settingsPath).bytes.equals(original)) {
+      throw new Error('NVM settings.txt 已被其他程序更新，请刷新后重试。');
+    }
+    fs.renameSync(tempBackupPath, backupPath);
+    fs.renameSync(tempSettingsPath, settingsPath);
   } finally {
     try {
-      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+      for (const tempFile of [tempSettingsPath, tempBackupPath]) {
+        if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+      }
+      fs.rmdirSync(tempDir);
     } catch {
-      // The original file and backup are still intact.
+      // Staged files are isolated and do not affect the active settings.
     }
   }
 
@@ -97,5 +156,6 @@ module.exports = {
   parseSettingsText,
   readSettingsFile,
   updateMirrorSetting,
+  updateMirrorSettings,
   updateSettingsText,
 };

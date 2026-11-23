@@ -1,12 +1,12 @@
 <script setup>
-import { ref, watch, onMounted } from 'vue';
+import { ref, watch, onActivated } from 'vue';
 import IconFileCogOutline from '~icons/mdi/file-cog-outline';
 import IconRefresh from '~icons/mdi/refresh';
 import IconCogOutline from '~icons/mdi/cog-outline';
 import IconContentCopy from '~icons/mdi/content-copy';
 import ConfigFileCard from '../components/ConfigFileCard.vue';
 import { getConfigFiles, initNpmPrefix } from '../constants/files.js';
-import { getNpmConfig } from '../utils/npm.js';
+import { getNpmCacheDir, getNpmConfig, getNpmGlobalConfigPath } from '../utils/npm.js';
 import { openPath, copyToClipboard, showSuccess, showError } from '../utils/utools.js';
 
 const props = defineProps({ hasNvm: Boolean });
@@ -16,22 +16,26 @@ const filesLoading = ref(false);
 const filesError = ref('');
 const npmConfig = ref('');
 const configLoading = ref(false);
+const npmConfigError = ref('');
 
 async function loadFiles(silent = false) {
+  if (filesLoading.value) return;
   filesLoading.value = true;
   filesError.value = '';
   try {
-    await initNpmPrefix();
-    const allFiles = getConfigFiles();
+    const [globalConfig, cacheDir] = await Promise.all([
+      getNpmGlobalConfigPath().catch(() => ''),
+      getNpmCacheDir().catch(() => ''),
+      initNpmPrefix(),
+    ]);
+    const allFiles = getConfigFiles({ globalConfig, cacheDir });
     files.value = allFiles
       .filter((f) => !f.requireNvm || props.hasNvm)
-      .map((f) => ({ ...f, exists: checkExists(f.path) }));
+      .map((f) => ({ ...f, exists: checkPath(f.path, f.type) }));
     if (!silent) showSuccess('配置文件列表已刷新');
   } catch (err) {
     filesError.value = err.message || '配置文件列表读取失败';
-    files.value = getConfigFiles()
-      .filter((f) => !f.requireNvm || props.hasNvm)
-      .map((f) => ({ ...f, exists: false }));
+    files.value = [];
     if (!silent) showError(`刷新失败: ${filesError.value}`);
   } finally {
     filesLoading.value = false;
@@ -39,29 +43,54 @@ async function loadFiles(silent = false) {
 }
 
 async function loadNpmConfig(silent = false) {
+  if (configLoading.value) return;
   configLoading.value = true;
+  npmConfigError.value = '';
   try {
     npmConfig.value = await getNpmConfig();
     if (!silent) showSuccess('npm 配置已刷新');
-  } catch {
-    npmConfig.value = '加载失败';
-    if (!silent) showError('刷新失败');
+  } catch (error) {
+    npmConfig.value = '';
+    npmConfigError.value = error.message || 'npm 配置读取失败';
+    if (!silent) showError(npmConfigError.value);
   }
   finally {
     configLoading.value = false;
   }
 }
 
-function checkExists(filePath) {
-  try { return window.nodeAPI.fs.existsSync(filePath); } catch { return false; }
+function checkPath(filePath, type) {
+  try {
+    const details = window.nodeAPI.fs.statSync(filePath);
+    return type === 'directory' ? details.isDirectory() : details.isFile();
+  } catch {
+    return false;
+  }
 }
 
-function handleOpen(fp) { openPath(fp) || showError('打开失败'); }
-function handleCopyPath(fp) { copyToClipboard(fp); showSuccess('路径已复制'); }
-function handleCopyConfig() { copyToClipboard(npmConfig.value); showSuccess('配置已复制'); }
+function handleOpen(fp) {
+  const file = files.value.find(({ path }) => path === fp);
+  if (!file || !checkPath(fp, file.type)) {
+    showError('文件或目录已不可用，请刷新配置文件列表');
+  } else if (!openPath(fp)) {
+    showError(file.needAdmin ? '无法打开 hosts，请检查权限或使用管理员编辑器' : '打开失败，请检查文件权限');
+  }
+}
+function handleCopyPath(fp) {
+  if (copyToClipboard(fp)) showSuccess('路径已复制');
+  else showError('复制路径失败');
+}
 
-watch(() => props.hasNvm, () => loadFiles(true), { immediate: true });
-onMounted(() => loadNpmConfig(true));
+function handleCopyConfig() {
+  if (copyToClipboard(npmConfig.value)) showSuccess('配置已复制');
+  else showError('复制配置失败');
+}
+
+watch(() => props.hasNvm, () => loadFiles(true));
+onActivated(() => {
+  loadFiles(true);
+  loadNpmConfig(true);
+});
 </script>
 
 <template>
@@ -102,10 +131,13 @@ onMounted(() => loadNpmConfig(true));
           <button class="btn btn-sm btn-secondary" :disabled="configLoading" @click="loadNpmConfig()">
             <IconRefresh :class="{ spin: configLoading }" /> {{ configLoading ? '刷新中' : '刷新' }}
           </button>
-          <button class="btn btn-sm btn-ghost" :disabled="configLoading || !npmConfig || npmConfig === '加载失败'" @click="handleCopyConfig"><IconContentCopy /> 复制</button>
+          <button class="btn btn-sm btn-ghost" :disabled="configLoading || !npmConfig" @click="handleCopyConfig"><IconContentCopy /> 复制</button>
         </div>
       </div>
       <div v-if="configLoading" class="skeleton" style="height:120px" />
+      <div v-else-if="npmConfigError" class="empty-state" role="alert">
+        <p class="empty-state-desc">{{ npmConfigError }}</p>
+      </div>
       <pre v-else class="config-output">{{ npmConfig || '暂无配置信息' }}</pre>
     </div>
   </div>

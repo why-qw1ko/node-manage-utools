@@ -5,8 +5,9 @@ import IconRefresh from '~icons/mdi/refresh';
 import IconDeleteSweep from '~icons/mdi/delete-sweep';
 import IconLoading from '~icons/mdi/loading';
 import IconFolderOpen from '~icons/mdi/folder-open-outline';
-import { getNpmPrefix, getNpmCacheDir, cleanNpmCache } from '../utils/npm.js';
-import { showSuccess, showError } from '../utils/utools.js';
+import { getNpmPrefix, getNpmCacheDir, cleanNpmCache, isSafeCacheDirectory } from '../utils/npm.js';
+import { getNvmDir } from '../utils/nvm.js';
+import { openPath, showSuccess, showError } from '../utils/utools.js';
 import { confirmAction } from '../utils/confirm.js';
 
 const loading = ref(false);
@@ -16,6 +17,10 @@ const npmCacheSize = ref('');
 const npmGlobalSize = ref('');
 const totalSize = ref('');
 const loadError = ref('');
+const cacheDirectory = ref('');
+const cacheWarning = ref('');
+const cacheActionError = ref('');
+const cacheConfirming = ref(false);
 
 function formatSize(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -26,44 +31,56 @@ function formatSize(bytes) {
 }
 
 async function getDirSize(dirPath) {
+  if (!dirPath) return { bytes: 0, label: '不可用', incomplete: true };
   try {
-    const bytes = await window.nodeAPI.fs.getDirectorySize(dirPath);
-    return { bytes, label: formatSize(bytes) };
+    const { bytes, incomplete } = await window.nodeAPI.fs.getDirectorySize(dirPath);
+    const label = incomplete ? (bytes ? `至少 ${formatSize(bytes)}` : '读取不完整') : formatSize(bytes);
+    return { bytes, label, incomplete };
   } catch {
-    return { bytes: 0, label: '计算失败' };
+    return { bytes: 0, label: '计算失败', incomplete: true };
   }
 }
 
 async function loadDiskUsage(silent = false) {
+  if (loading.value) return;
   loading.value = true;
   loadError.value = '';
+  cacheDirectory.value = '';
+  cacheWarning.value = '';
   try {
-    const home = window.nodeAPI.os.homedir();
-    const nvmHome = window.nodeAPI.env.NVM_HOME || window.nodeAPI.path.join(home, 'AppData', 'Roaming', 'nvm');
-    const [npmPrefix, npmCacheDir] = await Promise.all([
-      getNpmPrefix().catch(() => window.nodeAPI.path.join(home, 'AppData', 'Roaming', 'npm')),
-      getNpmCacheDir().catch(() => window.nodeAPI.path.join(home, 'AppData', 'Local', 'npm-cache')),
-    ]);
-    const npmGlobalDir = window.nodeAPI.path.join(npmPrefix, 'node_modules');
+    const isWindows = window.nodeAPI.os.platform() === 'win32';
+    const path = window.nodeAPI.path;
+    const nvmHome = getNvmDir();
+    const [prefix, cache] = await Promise.allSettled([getNpmPrefix(), getNpmCacheDir()]);
+    const npmPrefix = prefix.status === 'fulfilled' ? prefix.value : '';
+    const npmCacheDir = cache.status === 'fulfilled' ? cache.value : '';
+    if (isSafeCacheDirectory(npmCacheDir)) cacheDirectory.value = npmCacheDir;
+    else cacheWarning.value = cache.reason?.message || 'npm 缓存路径无效，请检查 npm 配置中的 cache';
+    const npmGlobalDir = npmPrefix
+      ? path.join(npmPrefix, ...(isWindows ? ['node_modules'] : ['lib', 'node_modules']))
+      : '';
 
     // Get node versions directories
     const fs = window.nodeAPI.fs;
-    if (fs.existsSync(nvmHome)) {
+    if (nvmHome && fs.existsSync(nvmHome)) {
       const entries = fs.readdirSync(nvmHome);
       const versions = entries
-        .filter((name) => name.startsWith('v') && fs.statSync(window.nodeAPI.path.join(nvmHome, name)).isDirectory())
+        .filter((name) => /^v\d+\.\d+\.\d+$/i.test(name))
         .map((name) => ({
           name,
-          path: window.nodeAPI.path.join(nvmHome, name),
+          path: path.join(nvmHome, name),
           size: '计算中...',
           bytes: 0,
-        }));
+        })).filter((version) => {
+          try { return fs.statSync(version.path).isDirectory(); } catch { return false; }
+        });
       nodeVersions.value = await Promise.all(versions.map(async (version) => {
         const result = await getDirSize(version.path);
         return {
           ...version,
           size: result.label,
           bytes: result.bytes,
+          incomplete: result.incomplete,
         };
       }));
     } else {
@@ -71,7 +88,7 @@ async function loadDiskUsage(silent = false) {
     }
 
     const [cacheResult, globalResult] = await Promise.all([
-      getDirSize(npmCacheDir),
+      getDirSize(cacheDirectory.value),
       getDirSize(npmGlobalDir),
     ]);
     npmCacheSize.value = cacheResult.label;
@@ -80,7 +97,8 @@ async function loadDiskUsage(silent = false) {
     const totalBytes = nodeVersions.value.reduce((sum, version) => sum + version.bytes, 0)
       + cacheResult.bytes
       + globalResult.bytes;
-    totalSize.value = formatSize(totalBytes);
+    const incomplete = cacheResult.incomplete || globalResult.incomplete || nodeVersions.value.some((version) => version.incomplete);
+    totalSize.value = incomplete ? (totalBytes ? `至少 ${formatSize(totalBytes)}` : '读取不完整') : formatSize(totalBytes);
 
     if (!silent) showSuccess('磁盘占用数据已刷新');
   } catch (err) {
@@ -93,32 +111,35 @@ async function loadDiskUsage(silent = false) {
 }
 
 async function handleCleanCache() {
-  const confirmed = await confirmAction({
-    title: '清理 npm 缓存',
-    message: '确定要清理 npm 缓存吗？这不会影响已安装的包。',
-    confirmText: '清理缓存',
-    danger: true,
-  });
-  if (!confirmed) return;
-  cleaning.value = true;
+  if (cleaning.value || loading.value || cacheConfirming.value || !cacheDirectory.value) return;
+  const directory = cacheDirectory.value;
+  cacheConfirming.value = true;
+  cacheActionError.value = '';
   try {
-    await cleanNpmCache();
+    const confirmed = await confirmAction({
+      title: '清理 npm 缓存',
+      message: `缓存目录：${directory}\n\n清理下载缓存后，后续安装可能需要联网重新下载。已安装的包会保留。`,
+      confirmText: '清理缓存',
+      danger: true,
+    });
+    if (!confirmed) return;
+    cacheConfirming.value = false;
+    cleaning.value = true;
+    await cleanNpmCache(directory);
     showSuccess('npm 缓存已清理');
     await loadDiskUsage(true);
   } catch (err) {
-    showError('清理失败: ' + err.message);
+    cacheActionError.value = err.message || '清理失败，请刷新确认剩余缓存';
+    await loadDiskUsage(true);
   }
   finally {
+    cacheConfirming.value = false;
     cleaning.value = false;
   }
 }
 
 function openFolder(path) {
-  try {
-    utools.shellOpenPath(path);
-  } catch {
-    showError('打开失败');
-  }
+  if (!openPath(path)) showError('打开失败');
 }
 
 const sortedVersions = computed(() => {
@@ -133,7 +154,7 @@ onMounted(() => loadDiskUsage(true)); // silent on initial load
     <div class="section">
       <div class="section-header">
         <h2 class="section-title"><IconHarddisk class="icon" /> 磁盘占用分析</h2>
-        <button class="btn btn-sm btn-secondary" :disabled="loading || cleaning" @click="loadDiskUsage()">
+        <button class="btn btn-sm btn-secondary" :disabled="loading || cleaning || cacheConfirming" @click="loadDiskUsage()">
           <IconRefresh :class="{ spin: loading }" /> {{ loading ? '扫描中' : '刷新' }}
         </button>
       </div>
@@ -205,13 +226,14 @@ onMounted(() => loadDiskUsage(true)); // silent on initial load
               <span class="action-title">清理 npm 缓存</span>
               <span class="action-desc">清理 npm 下载缓存，不影响已安装的包</span>
             </div>
-            <button class="btn btn-danger" :disabled="cleaning || loading" @click="handleCleanCache">
+            <button class="btn btn-danger" :disabled="cleaning || loading || cacheConfirming || !cacheDirectory" @click="handleCleanCache">
               <IconLoading v-if="cleaning" class="spin" />
               <IconDeleteSweep v-else />
               {{ cleaning ? '清理中...' : '清理缓存' }}
             </button>
           </div>
         </div>
+        <p v-if="cacheActionError || cacheWarning" class="section-desc" role="alert">{{ cacheActionError || cacheWarning }}</p>
       </div>
     </template>
   </div>

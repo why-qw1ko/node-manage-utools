@@ -11,7 +11,12 @@
     {
       "code": "node-manager",
       "explain": "Node 版本管理",
-      "cmds": ["node", "nvm", "npm"]
+      "cmds": [
+        "node",
+        "nvm",
+        "npm",
+        { "type": "files", "label": "检测项目 Node.js 版本", "fileType": "directory", "minLength": 1, "maxLength": 1 }
+      ]
     },
     {
       "code": "mirror-manager",

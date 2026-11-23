@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onActivated } from 'vue';
 import IconPackageVariant from '~icons/mdi/package-variant';
 import IconRefresh from '~icons/mdi/refresh';
 import IconPlus from '~icons/mdi/plus';
@@ -8,20 +8,24 @@ import IconMagnify from '~icons/mdi/magnify';
 import IconDownload from '~icons/mdi/download';
 import IconLoading from '~icons/mdi/loading';
 import PackageCard from '../components/PackageCard.vue';
-import { getGlobalPackages, installGlobalPackage, uninstallGlobalPackage, normalizePackageSpec } from '../utils/npm.js';
+import { getGlobalPackages, getNpmPrefix, installGlobalPackage, uninstallGlobalPackage, normalizePackageSpec } from '../utils/npm.js';
 import { showSuccess, showError } from '../utils/utools.js';
 import { confirmAction } from '../utils/confirm.js';
 
 const packages = ref([]);
+const packagePrefix = ref('');
 const loading = ref(false);
 const loaded = ref(false);
 const loadError = ref('');
 const searchQuery = ref('');
 const showInstallDialog = ref(false);
 const installInput = ref('');
+const installError = ref('');
+const confirmingPackage = ref(false);
 const installingPkg = ref(null);
 const operatingPkg = ref(null);
 
+const packagesBusy = computed(() => loading.value || confirmingPackage.value || !!installingPkg.value || !!operatingPkg.value);
 const filteredPackages = computed(() => {
   if (!searchQuery.value) return packages.value;
   const q = searchQuery.value.toLowerCase();
@@ -29,10 +33,13 @@ const filteredPackages = computed(() => {
 });
 
 async function loadPackages(silent = false) {
+  if (loading.value || (!silent && packagesBusy.value)) return;
   loading.value = true;
   loadError.value = '';
   try {
-    packages.value = await getGlobalPackages();
+    const [installed, prefix] = await Promise.all([getGlobalPackages(), getNpmPrefix()]);
+    packages.value = installed;
+    packagePrefix.value = prefix;
     loaded.value = true;
     if (!silent) showSuccess('全局包列表已刷新');
   } catch (err) {
@@ -46,73 +53,97 @@ async function loadPackages(silent = false) {
 }
 
 function openInstallDialog() {
+  if (packagesBusy.value) return;
   installInput.value = '';
+  installError.value = '';
   showInstallDialog.value = true;
 }
 
 function closeInstallDialog() {
-  if (installingPkg.value) return;
+  if (installingPkg.value || confirmingPackage.value) return;
   showInstallDialog.value = false;
   installInput.value = '';
 }
 
-async function handleInstall() {
-  const name = installInput.value.trim();
-  if (!name) return;
+async function confirmPackageChange(title, name, warning, fromPackageList = false) {
+  confirmingPackage.value = true;
   try {
-    normalizePackageSpec(name);
-  } catch (err) {
-    showError(err.message);
-    return;
+    const prefix = await getNpmPrefix();
+    if (!prefix) throw new Error('无法确认 npm 全局安装目录，请刷新后重试');
+    if (fromPackageList && prefix !== packagePrefix.value) {
+      await loadPackages(true);
+      throw new Error('npm 全局目录已变更，请核对刷新后的包列表再继续');
+    }
+    const confirmed = await confirmAction({
+      title,
+      message: `${name}\n全局安装目录：${prefix}\n\n${warning}`,
+      confirmText: '继续',
+      danger: true,
+    });
+    return confirmed ? prefix : '';
+  } finally {
+    confirmingPackage.value = false;
   }
-  installingPkg.value = name;
+}
+
+async function handleInstall() {
+  if (!installInput.value.trim() || packagesBusy.value) return;
+  installError.value = '';
   try {
-    await installGlobalPackage(name);
+    const name = normalizePackageSpec(installInput.value);
+    const prefix = await confirmPackageChange('安装全局包', name, 'npm 可能执行软件包的安装脚本。请确认包名和来源可信。');
+    if (!prefix || !showInstallDialog.value) return;
+    installingPkg.value = name;
+    await installGlobalPackage(name, prefix);
     showSuccess(`已安装 ${name}`);
     showInstallDialog.value = false;
     installInput.value = '';
     await loadPackages(true);
   } catch (err) {
-    showError(`安装失败: ${err.message}`);
+    installError.value = err.message || '安装失败，请检查 npm 环境后重试';
+    if (installingPkg.value) await loadPackages(true);
   } finally {
     installingPkg.value = null;
   }
 }
 
 async function handleUninstall(name) {
-  const confirmed = await confirmAction({
-    title: '卸载全局包',
-    message: `确定要卸载全局包 ${name} 吗？`,
-    confirmText: '卸载',
-    danger: true,
-  });
-  if (!confirmed) return;
-  operatingPkg.value = name;
+  if (packagesBusy.value) return;
   try {
-    await uninstallGlobalPackage(name);
+    const prefix = await confirmPackageChange('卸载全局包', name, '相关全局命令将从当前 npm 环境移除。', true);
+    if (!prefix) return;
+    operatingPkg.value = name;
+    await uninstallGlobalPackage(name, prefix);
     showSuccess(`已卸载 ${name}`);
     await loadPackages(true);
   } catch (err) {
     showError(`卸载失败: ${err.message}`);
+    if (operatingPkg.value) await loadPackages(true);
   } finally {
     operatingPkg.value = null;
   }
 }
 
 async function handleUpdate(name) {
-  operatingPkg.value = name;
+  if (packagesBusy.value) return;
   try {
-    await installGlobalPackage(name);
+    const prefix = await confirmPackageChange('更新全局包', name, 'npm 可能安装新的主版本并执行安装脚本，现有全局命令可能发生变化。', true);
+    if (!prefix) return;
+    operatingPkg.value = name;
+    await installGlobalPackage(name, prefix);
     showSuccess(`已更新 ${name}`);
     await loadPackages(true);
   } catch (err) {
     showError(`更新失败: ${err.message}`);
+    if (operatingPkg.value) await loadPackages(true);
   } finally {
     operatingPkg.value = null;
   }
 }
 
-onMounted(() => loadPackages(true)); // silent on initial load
+onActivated(() => {
+  if (!packagesBusy.value) loadPackages(true);
+});
 </script>
 
 <template>
@@ -120,7 +151,7 @@ onMounted(() => loadPackages(true)); // silent on initial load
     <div class="section">
       <div class="section-header">
         <h2 class="section-title"><IconPackageVariant class="icon" /> 全局包管理</h2>
-        <button class="btn btn-sm btn-secondary" :disabled="loading" @click="loadPackages()">
+        <button class="btn btn-sm btn-secondary" :disabled="packagesBusy" @click="loadPackages()">
           <IconRefresh :class="{ spin: loading }" /> {{ loading ? '刷新中' : '刷新' }}
         </button>
       </div>
@@ -134,7 +165,7 @@ onMounted(() => loadPackages(true)); // silent on initial load
         <IconMagnify class="search-icon" />
         <input v-model="searchQuery" class="input search-input" placeholder="搜索包名..." />
       </div>
-      <button class="btn btn-primary" :disabled="!!installingPkg || !!operatingPkg" @click="openInstallDialog"><IconPlus /> 安装新包</button>
+      <button class="btn btn-primary" :disabled="packagesBusy" @click="openInstallDialog"><IconPlus /> 安装新包</button>
     </div>
 
     <div v-if="installingPkg" class="install-banner">
@@ -148,7 +179,7 @@ onMounted(() => loadPackages(true)); // silent on initial load
     <div v-else-if="loadError" class="empty-state" style="padding:48px">
       <IconPackageVariant class="empty-state-icon" />
       <p class="empty-state-desc">{{ loadError }}</p>
-      <button class="btn btn-sm btn-secondary" style="margin-top:12px" @click="loadPackages()">重试</button>
+      <button class="btn btn-sm btn-secondary" style="margin-top:12px" :disabled="packagesBusy" @click="loadPackages()">重试</button>
     </div>
     <div v-else-if="filteredPackages.length === 0" class="empty-state" style="padding:48px">
       <IconPackageVariant class="empty-state-icon" />
@@ -159,7 +190,7 @@ onMounted(() => loadPackages(true)); // silent on initial load
         v-for="pkg in filteredPackages" :key="pkg.name"
         :name="pkg.name" :version="pkg.version"
         :loading="operatingPkg === pkg.name"
-        :disabled="!!operatingPkg || !!installingPkg"
+        :disabled="packagesBusy"
         @uninstall="handleUninstall" @update="handleUpdate"
       />
     </div>
@@ -169,15 +200,16 @@ onMounted(() => loadPackages(true)); // silent on initial load
         <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="package-install-title">
           <div class="d-head">
             <h3 id="package-install-title" class="d-title">安装全局包</h3>
-            <button class="btn btn-ghost btn-icon btn-sm" aria-label="关闭" :disabled="!!installingPkg" @click="closeInstallDialog"><IconClose /></button>
+            <button class="btn btn-ghost btn-icon btn-sm" aria-label="关闭" :disabled="!!installingPkg || confirmingPackage" @click="closeInstallDialog"><IconClose /></button>
           </div>
           <div class="d-body">
             <p class="d-hint">输入包名，例如 express、typescript、vite</p>
-            <input v-model="installInput" class="input" placeholder="包名" autofocus @keyup.enter="handleInstall" />
+            <input v-model="installInput" class="input" placeholder="包名" :disabled="packagesBusy" autofocus @keyup.enter="handleInstall" />
+            <p v-if="installError" class="d-hint" role="alert">{{ installError }}</p>
           </div>
           <div class="d-foot">
-            <button class="btn btn-secondary" :disabled="!!installingPkg" @click="closeInstallDialog">取消</button>
-            <button class="btn btn-primary" :disabled="!installInput.trim() || !!installingPkg" @click="handleInstall">
+            <button class="btn btn-secondary" :disabled="!!installingPkg || confirmingPackage" @click="closeInstallDialog">取消</button>
+            <button class="btn btn-primary" :disabled="!installInput.trim() || packagesBusy" @click="handleInstall">
               <IconLoading v-if="installingPkg" class="spin" />
               <IconDownload v-else />
               {{ installingPkg ? '安装中' : '安装' }}

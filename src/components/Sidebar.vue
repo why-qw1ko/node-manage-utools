@@ -10,13 +10,12 @@ import IconHarddisk from '~icons/mdi/harddisk';
 
 defineProps({
   activeTab: { type: String, default: 'node' },
-  hasNvm: { type: Boolean, default: false },
 });
 
 const emit = defineEmits(['change']);
 
 const tabs = [
-  { id: 'node', label: 'Node 版本', icon: IconNodejs, requireNvm: true },
+  { id: 'node', label: 'Node 版本', icon: IconNodejs },
   { id: 'mirror', label: '镜像源', icon: IconSwapHorizontal },
   { id: 'packages', label: '全局包', icon: IconPackageVariant },
   { id: 'config', label: '配置文件', icon: IconFileCogOutline },
@@ -37,13 +36,11 @@ const tabs = [
       <button
         v-for="tab in tabs" :key="tab.id"
         class="sidebar-item" :class="{ active: activeTab === tab.id }"
-        :disabled="tab.requireNvm && !hasNvm"
-        :title="tab.requireNvm && !hasNvm ? '需要安装 nvm-windows' : ''"
+        :aria-current="activeTab === tab.id ? 'page' : undefined"
         @click="emit('change', tab.id)"
       >
         <component :is="tab.icon" class="sidebar-icon" />
         <span class="sidebar-label">{{ tab.label }}</span>
-        <span v-if="tab.requireNvm && !hasNvm" class="sidebar-badge">nvm</span>
       </button>
     </nav>
   </aside>
@@ -56,10 +53,8 @@ const tabs = [
 .sidebar-title { font-size: 14px; font-weight: 700; color: var(--text); }
 .sidebar-nav { flex: 1; padding: 4px 8px; overflow-y: auto; }
 .sidebar-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; margin-bottom: 2px; font-family: var(--font-sans); font-size: 13px; font-weight: 500; color: var(--text-secondary); background: transparent; border: none; border-radius: var(--radius-md); cursor: pointer; transition: all var(--transition-fast); text-align: left; }
-.sidebar-item:hover:not(:disabled) { background: var(--surface); color: var(--text); }
+.sidebar-item:hover { background: var(--surface); color: var(--text); }
 .sidebar-item.active { background: var(--primary-dim); color: var(--primary); }
-.sidebar-item:disabled { opacity: 0.5; cursor: not-allowed; }
 .sidebar-icon { width: 18px; height: 18px; flex-shrink: 0; }
 .sidebar-label { flex: 1; }
-.sidebar-badge { font-size: 10px; padding: 2px 6px; background: var(--warning-dim); color: var(--warning); border-radius: var(--radius-full); }
 </style>
