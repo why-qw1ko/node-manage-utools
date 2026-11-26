@@ -1,6 +1,8 @@
 import { withLocalMutation } from './command.js';
 import { redactCredentials } from './credentials.js';
 
+export const OFFICIAL_NODE_MIRROR = 'https://nodejs.org/dist/';
+
 function normalizeMirrorUrl(url) {
   const raw = String(url || '').trim();
   if (!raw || raw.length > 2048) throw new Error('安装源地址无效');
@@ -18,7 +20,7 @@ function normalizeMirrorUrl(url) {
  */
 export async function getNodeMirror() {
   const settings = window.nodeAPI.nvm?.getSettings?.() || {};
-  return redactCredentials(settings.node_mirror) || 'https://nodejs.org/dist/';
+  return redactCredentials(settings.node_mirror) || OFFICIAL_NODE_MIRROR;
 }
 
 /**
@@ -59,7 +61,7 @@ export async function applyMirrorPreset({ node, npm }) {
 export const PRESET_MIRRORS = [
   {
     name: '官方源',
-    node: 'https://nodejs.org/dist/',
+    node: OFFICIAL_NODE_MIRROR,
     npm: 'https://github.com/npm/cli/archive/',
   },
   {

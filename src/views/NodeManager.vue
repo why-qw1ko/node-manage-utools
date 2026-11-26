@@ -13,8 +13,8 @@ import IconLinkVariant from '~icons/mdi/link-variant';
 import IconCheckCircle from '~icons/mdi/check-circle-outline';
 import IconAlertCircle from '~icons/mdi/alert-circle-outline';
 import VersionCard from '../components/VersionCard.vue';
-import { getCurrentNodeVersion, listInstalledVersions, listAvailableVersions, installVersionWithProgress, uninstallVersion, useVersion } from '../utils/nvm.js';
-import { getNodeMirror, getNpmMirror, setNodeMirror, setNpmMirror, applyMirrorPreset, PRESET_MIRRORS } from '../utils/nvm-mirror.js';
+import { getCurrentNodeVersion, listInstalledVersions, listAvailableVersions, installVersionWithProgress, uninstallVersion, cleanIncompleteVersion, useVersion } from '../utils/nvm.js';
+import { getNodeMirror, getNpmMirror, setNodeMirror, setNpmMirror, applyMirrorPreset, OFFICIAL_NODE_MIRROR, PRESET_MIRRORS } from '../utils/nvm-mirror.js';
 import { copyToClipboard, openExternal, showSuccess, showError } from '../utils/utools.js';
 import { confirmAction } from '../utils/confirm.js';
 
@@ -36,6 +36,7 @@ const installedVersions = ref([]);
 const availableVersions = ref([]);
 const availableLoading = ref(false);
 const availableError = ref('');
+let availableRequestId = 0;
 const loading = ref(false);
 const versionsError = ref('');
 const versionActionError = ref('');
@@ -46,7 +47,9 @@ const showInstallDialog = ref(false);
 const installInput = ref('');
 const installStatus = ref('idle');
 const installError = ref('');
-const installNeedsVerification = ref(false);
+const installErrorCode = ref('');
+const installNeedsVerification = computed(() => ['ETIMEDOUT', 'NVM_RESULT_UNVERIFIED'].includes(installErrorCode.value));
+const installSourceUnavailable = computed(() => installErrorCode.value === 'NVM_VERSION_UNAVAILABLE');
 
 // Search and filter state
 const searchQuery = ref('');
@@ -54,6 +57,8 @@ const activeFilter = ref('all');
 
 // Install progress state
 const installProgress = ref('');
+const installCancelPending = ref(false);
+let activeInstallTask;
 
 // Mirror config state
 const nodeMirror = ref('');
@@ -132,13 +137,17 @@ async function loadMirrors(silent = false) {
 }
 
 async function handleSetNodeMirror(url) {
-  if (mirrorLoading.value || versionBusy.value) return;
+  if (mirrorLoading.value || versionBusy.value) return false;
   mirrorLoading.value = true;
   try {
     await setNodeMirror(url);
     nodeMirror.value = url;
     showSuccess('Node 安装源已切换');
-  } catch (err) { showError(`切换失败: ${err.message}`); }
+    return true;
+  } catch (err) {
+    showError(`切换失败: ${err.message}`);
+    return false;
+  }
   finally { mirrorLoading.value = false; }
 }
 
@@ -170,15 +179,17 @@ async function applyPreset(preset) {
 }
 
 async function refreshAvailable() {
-  if (availableLoading.value) return;
+  const requestId = ++availableRequestId;
   availableLoading.value = true;
   availableError.value = '';
+  availableVersions.value = [];
   try {
-    availableVersions.value = await listAvailableVersions();
+    const versions = await listAvailableVersions();
+    if (requestId === availableRequestId) availableVersions.value = versions;
   } catch (err) {
-    availableError.value = err.message || '可用版本读取失败';
+    if (requestId === availableRequestId) availableError.value = err.message || '可用版本读取失败';
   } finally {
-    availableLoading.value = false;
+    if (requestId === availableRequestId) availableLoading.value = false;
   }
 }
 
@@ -210,7 +221,15 @@ async function refreshList(silent = false) {
   loading.value = true;
   versionsError.value = '';
   try {
-    installedVersions.value = await listInstalledVersions();
+    const versions = await listInstalledVersions();
+    installedVersions.value = versions.map((entry) => {
+      try {
+        const { hasExecutable } = window.nodeAPI.fs.inspectNvmVersion(entry.version, entry.path);
+        return { ...entry, status: hasExecutable ? 'ready' : 'incomplete' };
+      } catch {
+        return { ...entry, status: 'unverified' };
+      }
+    });
     if (!silent) showSuccess('版本列表已刷新');
   } catch (err) {
     versionsError.value = err.message || '版本列表读取失败';
@@ -234,41 +253,50 @@ async function handleUse(version) {
   }
 }
 
-async function handleUninstall({ version, path }) {
+async function handleUninstall({ version, path, status }) {
   if (!props.hasNvm || versionBusy.value || showInstallDialog.value) return;
   versionActionError.value = '';
   if (!path) {
     versionActionError.value = '无法确认版本目录。请刷新已安装版本列表后重试。';
     return;
   }
+  const incomplete = status === 'incomplete';
+  const actionLabel = incomplete ? '清理残留' : '卸载版本';
   const confirmed = await confirmAction({
-    title: '卸载 Node.js',
-    message: `卸载 Node.js v${version} 会删除此版本目录及其中安装的全局 npm 包。\n\n${path}`,
-    confirmText: '卸载版本',
+    title: incomplete ? '清理未完成的安装' : '卸载 Node.js',
+    message: incomplete
+      ? `删除 Node.js v${version} 未完成的下载文件和空目录。\n\n${path}`
+      : `卸载 Node.js v${version} 会删除此版本目录及其中安装的全局 npm 包。\n\n${path}`,
+    confirmText: actionLabel,
     danger: true,
   });
   if (!confirmed || !props.hasNvm || versionBusy.value || showInstallDialog.value) return;
   uninstallingVersion.value = version;
   try {
-    await uninstallVersion(version, path);
-    showSuccess(`已卸载 Node.js v${version}`);
+    if (incomplete) {
+      await cleanIncompleteVersion(version, path);
+      showSuccess(`已清理 Node.js v${version} 的安装残留`);
+    } else {
+      await uninstallVersion(version, path);
+      showSuccess(`已卸载 Node.js v${version}`);
+    }
   } catch (error) {
-    versionActionError.value = `卸载失败。${error.message}`;
+    versionActionError.value = `${actionLabel}失败。${error.message}`;
   } finally {
     await refreshVersionState();
     uninstallingVersion.value = null;
   }
 }
 
-function openInstallDialog() {
+function openInstallDialog(version = '') {
   if (!props.hasNvm || versionBusy.value || showInstallDialog.value) return;
   installStatus.value = 'idle';
   installError.value = '';
-  installNeedsVerification.value = false;
+  installErrorCode.value = '';
   installProgress.value = '';
-  installInput.value = '';
+  installInput.value = version;
   showInstallDialog.value = true;
-  if (!availableVersions.value.length) refreshAvailable();
+  refreshAvailable();
 }
 
 function closeInstallDialog() {
@@ -276,7 +304,7 @@ function closeInstallDialog() {
   showInstallDialog.value = false;
   installStatus.value = 'idle';
   installError.value = '';
-  installNeedsVerification.value = false;
+  installErrorCode.value = '';
   installProgress.value = '';
   installInput.value = '';
 }
@@ -286,29 +314,55 @@ function reviewInstalledVersions() {
   if (props.hasNvm) refreshVersionState();
 }
 
+async function switchInstallToOfficialMirror() {
+  if (!await handleSetNodeMirror(OFFICIAL_NODE_MIRROR) || !showInstallDialog.value) return;
+  installError.value = '';
+  installErrorCode.value = '';
+  installStatus.value = 'idle';
+  refreshAvailable();
+}
+
+function cancelInstall() {
+  if (!activeInstallTask || installCancelPending.value) return;
+  try {
+    if (activeInstallTask.kill()) installCancelPending.value = true;
+    else installProgress.value = '取消请求未生效，正在等待 NVM 返回结果。';
+  } catch {
+    showError('无法取消安装，请等待 NVM 返回结果');
+  }
+}
+
 async function handleInstall() {
   const v = installInput.value.trim();
   if (!v || !props.hasNvm || versionBusy.value || mirrorLoading.value || installNeedsVerification.value) return;
   installingVersion.value = v;
   installStatus.value = 'installing';
   installError.value = '';
+  installErrorCode.value = '';
   installProgress.value = '准备安装...';
   try {
-    const { promise } = installVersionWithProgress(v, (text) => {
+    activeInstallTask = installVersionWithProgress(v, (text) => {
       // Extract progress info from nvm output
       const lines = text.split('\n').filter(Boolean);
       const lastLine = lines[lines.length - 1]?.trim();
       if (lastLine) installProgress.value = lastLine;
     });
-    await promise;
+    await activeInstallTask.promise;
     await refreshVersionState();
     installStatus.value = 'success';
     showSuccess(`已安装 Node.js ${formatNodeVersion(v)}`);
   } catch (err) {
+    if (err.code === 'ECANCELED') {
+      installStatus.value = 'cancelled';
+      await refreshVersionState();
+      return;
+    }
     installStatus.value = 'error';
     installError.value = err.message;
-    installNeedsVerification.value = ['ETIMEDOUT', 'NVM_RESULT_UNVERIFIED'].includes(err.code);
+    installErrorCode.value = err.code || '';
   } finally {
+    activeInstallTask = undefined;
+    installCancelPending.value = false;
     installingVersion.value = null;
   }
 }
@@ -360,7 +414,7 @@ async function handleInstall() {
               </span>
             </div>
           </div>
-          <button class="btn btn-primary" :disabled="versionBusy || mirrorLoading" @click="openInstallDialog"><IconPlus /> 安装新版本</button>
+          <button class="btn btn-primary" :disabled="versionBusy || mirrorLoading" @click="openInstallDialog()"><IconPlus /> 安装新版本</button>
         </div>
         <div v-if="currentError" class="inline-error current-error" role="alert">
           <IconAlertCircle /> <span>{{ currentError }}</span>
@@ -403,7 +457,7 @@ async function handleInstall() {
 
       <div class="section">
         <div class="section-header">
-          <h2 class="section-title"><IconFormatListBulleted class="icon" /> 已安装版本</h2>
+          <h2 class="section-title"><IconFormatListBulleted class="icon" /> 本地版本</h2>
           <button class="btn btn-sm btn-secondary" :disabled="loading" @click="refreshList()">
             <IconRefresh :class="{ spin: loading }" /> {{ loading ? '刷新中' : '刷新' }}
           </button>
@@ -436,10 +490,10 @@ async function handleInstall() {
         <div v-else class="v-list">
           <VersionCard
             v-for="v in filteredInstalledVersions" :key="v.version"
-            :version="v.version" :active="v.active"
+            :version="v.version" :active="v.active" :status="v.status"
             :installing="installingVersion === v.version" :uninstalling="uninstallingVersion === v.version"
             :disabled="versionBusy"
-            @use="handleUse" @uninstall="handleUninstall(v)"
+            @use="handleUse" @uninstall="handleUninstall(v)" @reinstall="openInstallDialog(v.version)"
           />
         </div>
       </div>
@@ -459,8 +513,12 @@ async function handleInstall() {
             </template>
             <div v-if="installStatus === 'installing'" class="dialog-status" role="status">
               <IconLoading class="dialog-status-icon spin" />
-              <strong>正在安装 Node.js {{ formatNodeVersion(installInput) }}</strong>
-              <p>{{ installProgress || '正在准备安装...' }}</p>
+              <strong>{{ installCancelPending ? '正在取消安装' : `正在安装 Node.js ${formatNodeVersion(installInput)}` }}</strong>
+              <p>{{ installCancelPending ? '正在等待 NVM 进程退出。' : installProgress || '正在准备安装...' }}</p>
+            </div>
+            <div v-else-if="installStatus === 'cancelled'" class="dialog-status" role="status">
+              <strong>已取消安装</strong>
+              <p>可在本地版本列表中重新安装，或清理留下的下载文件。</p>
             </div>
             <div v-else-if="installStatus === 'success'" class="dialog-status success">
               <IconCheckCircle class="dialog-status-icon" />
@@ -468,8 +526,10 @@ async function handleInstall() {
             </div>
             <div v-else-if="installStatus === 'error'" class="dialog-status error" role="alert">
               <IconAlertCircle class="dialog-status-icon" />
-              <strong>{{ installNeedsVerification ? '无法确认安装结果' : '安装失败' }}</strong>
+              <strong v-if="installSourceUnavailable">当前 Node 安装源的版本检查未通过</strong>
+              <strong v-else>{{ installNeedsVerification ? '无法确认安装结果' : '安装失败' }}</strong>
               <p>{{ installError }}</p>
+              <p v-if="installSourceUnavailable && nodeMirror !== OFFICIAL_NODE_MIRROR">镜像的最新版本清单可能尚未同步。可切换 Node 官方源后重试。</p>
               <p v-if="installNeedsVerification">安装状态可能已变化。请先查看已安装版本，再决定是否重试。</p>
             </div>
             <div v-if="installStatus === 'idle' && availableLoading" class="d-hint" style="margin-top:16px">
@@ -480,7 +540,7 @@ async function handleInstall() {
               <button type="button" class="btn btn-sm btn-ghost" @click="refreshAvailable">重试获取</button>
             </div>
             <div v-else-if="installStatus === 'idle' && availableVersions.length" class="d-suggestions">
-              <span class="d-sug-title">可用版本：</span>
+              <span class="d-sug-title">近期稳定版本（来自 nvm-windows）</span>
               <div class="d-sug-list">
                 <button v-for="v in availableVersions.slice(0,12)" :key="v.version"
                   class="btn btn-sm btn-ghost" @click="installInput = v.version">
@@ -494,10 +554,13 @@ async function handleInstall() {
               <button class="btn btn-secondary" @click="closeInstallDialog">取消</button>
               <button class="btn btn-primary" :disabled="!hasNvm || !installInput.trim() || versionBusy || mirrorLoading" @click="handleInstall"><IconDownload /> 安装</button>
             </template>
-            <span v-else-if="installStatus === 'installing'" class="d-hint">安装过程中请勿关闭插件</span>
+            <button v-else-if="installStatus === 'installing'" type="button" class="btn btn-secondary" :disabled="installCancelPending" @click="cancelInstall">
+              {{ installCancelPending ? '正在取消…' : '取消安装' }}
+            </button>
             <template v-else-if="installStatus === 'error'">
               <button class="btn btn-secondary" @click="closeInstallDialog">关闭</button>
               <button v-if="installNeedsVerification" class="btn btn-primary" @click="reviewInstalledVersions"><IconRefresh /> 查看已安装版本</button>
+              <button v-else-if="installSourceUnavailable && nodeMirror !== OFFICIAL_NODE_MIRROR" class="btn btn-primary" :disabled="mirrorLoading" @click="switchInstallToOfficialMirror">切换 Node 官方源</button>
               <button v-else class="btn btn-primary" :disabled="!hasNvm || !installInput.trim() || versionBusy || mirrorLoading" @click="handleInstall"><IconRefresh /> 重试</button>
             </template>
             <button v-else class="btn btn-primary" @click="closeInstallDialog">完成</button>

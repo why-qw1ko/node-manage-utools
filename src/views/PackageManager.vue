@@ -91,7 +91,7 @@ async function handleInstall() {
   installError.value = '';
   try {
     const name = normalizePackageSpec(installInput.value);
-    const prefix = await confirmPackageChange('安装全局包', name, 'npm 可能执行软件包的安装脚本。请确认包名和来源可信。');
+    const prefix = await confirmPackageChange('安装全局包', name, '安装前需在系统对话框中确认。插件会跳过常规生命周期脚本。');
     if (!prefix || !showInstallDialog.value) return;
     installingPkg.value = name;
     await installGlobalPackage(name, prefix);
@@ -100,6 +100,7 @@ async function handleInstall() {
     installInput.value = '';
     await loadPackages(true);
   } catch (err) {
+    if (err.code === 'ECANCELED') return;
     installError.value = err.message || '安装失败，请检查 npm 环境后重试';
     if (installingPkg.value) await loadPackages(true);
   } finally {
@@ -127,13 +128,14 @@ async function handleUninstall(name) {
 async function handleUpdate(name) {
   if (packagesBusy.value) return;
   try {
-    const prefix = await confirmPackageChange('更新全局包', name, 'npm 可能安装新的主版本并执行安装脚本，现有全局命令可能发生变化。', true);
+    const prefix = await confirmPackageChange('更新全局包', name, '更新可能安装新的主版本。更新前需在系统对话框中确认，插件会跳过常规生命周期脚本。', true);
     if (!prefix) return;
     operatingPkg.value = name;
     await installGlobalPackage(name, prefix);
     showSuccess(`已更新 ${name}`);
     await loadPackages(true);
   } catch (err) {
+    if (err.code === 'ECANCELED') return;
     showError(`更新失败: ${err.message}`);
     if (operatingPkg.value) await loadPackages(true);
   } finally {

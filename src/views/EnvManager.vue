@@ -4,7 +4,6 @@ import IconEarth from '~icons/mdi/earth';
 import IconRefresh from '~icons/mdi/refresh';
 import EnvCard from '../components/EnvCard.vue';
 import { getNpmConfig } from '../utils/npm.js';
-import { redactCredentials } from '../utils/credentials.js';
 import { copyToClipboard, showSuccess, showError } from '../utils/utools.js';
 
 const envVars = ref([]);
@@ -14,14 +13,9 @@ const refreshing = ref(false);
 const npmError = ref('');
 
 const ENV_DEFINITIONS = [
-  { name: 'NODE_ENV', description: 'Node 运行环境（development/production）' },
-  { name: 'NODE_PATH', description: 'Node 模块搜索路径' },
   { name: 'NVM_HOME', description: 'nvm-windows 安装目录' },
   { name: 'NVM_SYMLINK', description: 'nvm 符号链接目录（当前使用的 Node 版本）' },
-  { name: 'PATH', description: '系统路径（包含 Node.js）' },
-  { name: 'HTTP_PROXY', description: 'HTTP 代理地址' },
-  { name: 'HTTPS_PROXY', description: 'HTTPS 代理地址' },
-  { name: 'NODE_OPTIONS', description: 'Node.js 启动参数' },
+  { name: 'WINDIR', description: 'Windows 系统目录' },
 ];
 
 const NPM_CONFIG_KEYS = [
@@ -34,15 +28,10 @@ const NPM_CONFIG_KEYS = [
 
 function loadEnvVars(silent = false) {
   const environment = window.nodeAPI?.env;
-  envVars.value = ENV_DEFINITIONS.map((def) => {
-    const value = environment?.[def.name] || '';
-    return {
-      ...def,
-      value: def.name.endsWith('_PROXY')
-        ? redactCredentials(value).replace(/^[^\s/@]+@/, '[已隐藏]@')
-        : value,
-    };
-  }).filter((v) => v.value);
+  envVars.value = ENV_DEFINITIONS.map((def) => ({
+    ...def,
+    value: environment?.[def.name] || '',
+  })).filter((v) => v.value);
   if (!silent) showSuccess('环境变量已刷新');
 }
 
@@ -107,13 +96,13 @@ onActivated(() => refreshAll(true));
           <IconRefresh :class="{ spin: refreshing }" /> {{ refreshing ? '刷新中' : '刷新' }}
         </button>
       </div>
-      <p class="section-desc">显示 uTools 当前进程的环境变量。系统设置修改后请重新启动 uTools。</p>
+      <p class="section-desc">显示 uTools 当前进程中的 NVM 路径和 Windows 系统目录。系统设置修改后请重新启动 uTools。</p>
     </div>
 
     <div class="section">
       <h3 class="sub-title">系统环境变量</h3>
       <div v-if="envVars.length === 0" class="empty-state" style="padding:24px">
-        <p class="empty-state-desc">未检测到 Node 相关环境变量</p>
+        <p class="empty-state-desc">未检测到相关环境变量</p>
       </div>
       <div v-else class="env-grid">
         <EnvCard

@@ -13,7 +13,7 @@ import ConfirmDialog from './components/ConfirmDialog.vue';
 import { isNvmInstalled, normalizeNodeVersion, useVersion } from './utils/nvm.js';
 import { openPath, showSuccess, showError, showWarning } from './utils/utools.js';
 import { confirmAction, settleConfirm } from './utils/confirm.js';
-import { getConfigFileById, initNpmPrefix } from './constants/files.js';
+import { getConfigFileById } from './constants/files.js';
 import { removeLegacyRegistryCache } from './utils/store.js';
 
 const activeTab = ref('node');
@@ -22,7 +22,6 @@ const nvmError = ref('');
 const hasNvm = computed(() => nvmStatus.value === 'installed');
 const versionRefreshId = ref(0);
 const projectVersionFiles = ['.nvmrc', '.node-version'];
-const maxProjectVersionFileSize = 4096;
 let nvmReady = null;
 const views = {
   node: NodeManager,
@@ -70,14 +69,14 @@ function refreshNvm() {
 }
 
 function readProjectVersion(dirPath) {
-  const { fs, path } = window.nodeAPI;
+  const { fs } = window.nodeAPI;
   if (typeof fs.readSmallTextFileSync !== 'function') {
     throw new Error('无法读取项目版本声明。请重新加载插件后重试。');
   }
   for (const source of projectVersionFiles) {
     let content;
     try {
-      content = fs.readSmallTextFileSync(path.join(dirPath, source), maxProjectVersionFileSize);
+      content = fs.readSmallTextFileSync(dirPath, source);
     } catch (error) {
       if (error.code === 'ENOENT') continue;
       if (error.code === 'EFBIG') throw new Error(`${source} 超过 4 KB，请检查版本文件。`);
@@ -150,18 +149,13 @@ async function handlePluginEnter(action) {
       }
     }
     try {
-      if (fileId === 'npm-global-dir') await initNpmPrefix();
-      const file = getConfigFileById(fileId);
-      if (!file || !window.nodeAPI.fs.existsSync(file.path)) {
+      const file = await getConfigFileById(fileId);
+      if (!file?.exists) {
         activeTab.value = 'config';
         showError(`找不到${file?.name || '目标路径'}`);
-      } else {
-        const stats = window.nodeAPI.fs.statSync(file.path);
-        const expectedType = file.type === 'directory' ? stats.isDirectory() : stats.isFile();
-        if (!expectedType || !openPath(file.path)) {
-          activeTab.value = 'config';
-          showError(`无法打开${file.name}，可在配置文件页核对并复制路径`);
-        }
+      } else if (!openPath(file.path)) {
+        activeTab.value = 'config';
+        showError(`无法打开${file.name}，可在配置文件页核对并复制路径`);
       }
     } catch {
       activeTab.value = 'config';
@@ -181,14 +175,12 @@ async function handlePluginEnter(action) {
 
   // Detect project version when entering with a path
   if (action.type === 'files' && action.payload?.length > 0) {
-    const filePath = action.payload[0]?.path;
+    const { path: filePath, isFile } = action.payload[0] || {};
     if (filePath) {
       await nvmCheck;
       if (!hasNvm.value) return;
       try {
-        const dirPath = window.nodeAPI.fs.statSync(filePath).isDirectory()
-          ? filePath
-          : window.nodeAPI.path.dirname(filePath);
+        const dirPath = isFile === true ? window.nodeAPI.path.dirname(filePath) : filePath;
         await detectProjectVersion(dirPath);
       } catch {
         showError('无法读取项目路径');

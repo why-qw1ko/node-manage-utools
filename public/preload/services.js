@@ -3,29 +3,58 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { normalizeMirrorUrl, readSettingsFile, updateMirrorSetting, updateMirrorSettings } = require('./nvm-settings.js');
+const { createProcessService } = require('./process-service.js');
+const { createFilesystem } = require('./filesystem.js');
+const { redactCredentials } = require('./credentials.js');
+const { confirmNpmInstall } = require('./npm-confirm.js');
 
 const MAX_BUFFER = 10 * 1024 * 1024;
 const MAX_PROGRESS_TEXT = 64 * 1024;
 const PROGRESS_TIMEOUT = 15 * 60 * 1000;
-const DIRECTORY_SCAN_TIMEOUT = 10000;
+const PROGRESS_DRAIN_TIMEOUT = 1000;
+const NPM_READ_TIMEOUT = 20000;
+const NPM_INSTALL_TIMEOUT = 10 * 60 * 1000;
+const NPM_WRITE_TIMEOUT = 2 * 60 * 1000;
 const NODE_VERSION_PATTERN = /^(?:latest|lts|v?\d+(?:\.\d+){0,2})$/i;
 const COMPLETE_NODE_VERSION_PATTERN = /^v?\d+\.\d+\.\d+$/i;
 const PACKAGE_SPEC_PATTERN = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(?:@[a-z0-9._-]+)?$/i;
-const ALLOWED_ENV_KEYS = [
-  'NODE_ENV',
-  'NODE_PATH',
-  'PATH',
-  'HTTP_PROXY',
-  'HTTPS_PROXY',
-  'NODE_OPTIONS',
-  'WINDIR',
-];
+let nvmMutationInProgress = false;
+
+function assertNvmMutationIdle() {
+  if (nvmMutationInProgress) {
+    throw Object.assign(new Error('另一个 NVM 操作正在修改版本目录，请等待完成后重试'), { code: 'EBUSY' });
+  }
+}
+
+function beginNvmMutation() {
+  assertNvmMutationIdle();
+  nvmMutationInProgress = true;
+  return () => { nvmMutationInProgress = false; };
+}
+
+async function withNvmMutation(operation) {
+  const finish = beginNvmMutation();
+  try {
+    return await operation();
+  } finally {
+    finish();
+  }
+}
 
 function normalizeArgs(args) {
-  if (!Array.isArray(args) || args.some((arg) => typeof arg !== 'string' || arg.includes('\0'))) {
+  const length = Array.isArray(args) ? args.length : -1;
+  if (!Number.isInteger(length) || length < 0 || length > 4) {
     throw new TypeError('Command arguments must be an array of strings');
   }
-  return args;
+  const normalized = [];
+  for (let index = 0; index < length; index++) {
+    const arg = args[index];
+    if (typeof arg !== 'string' || arg.includes('\0')) {
+      throw new TypeError('Command arguments must be an array of strings');
+    }
+    normalized.push(arg);
+  }
+  return normalized;
 }
 
 function normalizeOptions(options = {}, command = {}) {
@@ -34,8 +63,7 @@ function normalizeOptions(options = {}, command = {}) {
     windowsHide: true,
     maxBuffer: MAX_BUFFER,
   };
-  const cwd = command.cwd || (typeof options.cwd === 'string' ? options.cwd : '');
-  if (cwd) normalized.cwd = cwd;
+  if (command.cwd) normalized.cwd = command.cwd;
   if (command.env) normalized.env = command.env;
   if (Number.isFinite(options.timeout) && options.timeout > 0) normalized.timeout = options.timeout;
   return normalized;
@@ -188,7 +216,7 @@ function assertSafeNvmSymlink(symlink) {
 }
 
 const NPM_COMMANDS = new Set([
-  '-v', 'cache\0clean\0--force', 'config\0list', 'config\0list\0--long', 'config\0get\0cache', 'config\0get\0globalconfig',
+  '-v', 'config\0list', 'config\0list\0--long', 'config\0get\0cache', 'config\0get\0globalconfig',
   'config\0get\0registry', 'list\0-g\0--depth=0\0--json', 'prefix\0-g',
 ]);
 
@@ -196,8 +224,6 @@ function getSafeNpmArgs(args) {
   // NUL distinguishes argument boundaries after normalizeArgs has rejected embedded NUL.
   if (NPM_COMMANDS.has(args.join('\0'))) return args;
   const [command, flag, value, registry] = args;
-  if (['install', 'uninstall'].includes(command) && flag === '-g' && args.length === 3
-      && value.length <= 214 && PACKAGE_SPEC_PATTERN.test(value)) return args;
   if (command === 'config' && flag === 'set' && value === 'registry' && args.length === 4) {
     return [command, flag, value, normalizeMirrorUrl(registry)];
   }
@@ -230,144 +256,156 @@ function resolveProgram(file, args) {
     return { file: executable, args };
   }
 
-  if (isWindows && normalizedFile === 'powershell.exe') {
-    if (args.length !== 4 || args[0] !== '-NoProfile' || args[1] !== '-NonInteractive' || args[2] !== '-Command' || !args[3]) {
-      throw new Error('PowerShell 参数无效');
-    }
-    return { file: path.join(getWindowsDirectory(), 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), args };
-  }
-
   if (normalizedFile !== 'npm' && !(isWindows && normalizedFile === 'npm.cmd')) {
     throw new Error('插件不支持运行此程序');
   }
   const npmArgs = getSafeNpmArgs(args);
-  if (!isWindows) return { file: 'npm', args: npmArgs };
+  const runtime = resolveNpmRuntime();
+  const returnsPath = npmArgs[0] === 'prefix' || (npmArgs[1] === 'get' && ['cache', 'globalconfig'].includes(npmArgs[2]));
+  let transformOutput;
+  if (npmArgs[0] === 'list') transformOutput = redactNpmList;
+  else if (npmArgs[1] === 'list') transformOutput = redactNpmOutput;
+  else if (!returnsPath) transformOutput = redactCredentials;
+  return { ...runtime, args: [...runtime.args, ...npmArgs], npm: true, transformOutput };
+}
+
+function resolveNpmRuntime() {
+  if (process.platform !== 'win32') return { file: 'npm', args: [] };
 
   for (const directory of new Set(getNodeSearchDirectories())) {
     if (!path.isAbsolute(directory)) continue;
     const npmCli = path.join(directory, 'node_modules', 'npm', 'bin', 'npm-cli.js');
     const nodeExe = path.join(directory, 'node.exe');
     if (fs.existsSync(npmCli) && fs.existsSync(nodeExe)) {
-      return { file: nodeExe, args: [npmCli, ...npmArgs] };
+      return { file: fs.realpathSync(nodeExe), args: [fs.realpathSync(npmCli)] };
     }
   }
 
   throw executableNotFound('未检测到 npm。请安装 Node.js 或启用已安装的 Node.js 版本，然后刷新。');
 }
 
-async function getDirectorySize(rootPath) {
-  if (typeof rootPath !== 'string' || !rootPath) return { bytes: 0, incomplete: true };
+function redactNpmOutput(output) {
+  return redactCredentials(output).replace(
+    /(^[^\r\n=]*\b(?:_auth(?:Token)?|auth[-_]?token|token|password|secret|api[-_]?key)\s*=)[^\r\n]*/gim,
+    '$1 [已隐藏]',
+  );
+}
 
-  let bytes = 0;
-  let incomplete = false;
-  let timedOut = false;
-  let timer;
-
-  async function scan() {
-    const pending = [rootPath];
-    while (pending.length > 0 && !timedOut) {
-      const current = pending.pop();
-      let entries;
-      try {
-        entries = await fs.promises.readdir(current, { withFileTypes: true });
-      } catch (error) {
-        if (current !== rootPath || error.code !== 'ENOENT') incomplete = true;
-        continue;
-      }
-
-      for (const entry of entries) {
-        if (timedOut) break;
-        const entryPath = path.join(current, entry.name);
-        if (entry.isDirectory()) {
-          pending.push(entryPath);
-        } else if (entry.isFile()) {
-          try {
-            bytes += (await fs.promises.lstat(entryPath)).size;
-          } catch {
-            incomplete = true;
-          }
-        } else if (entry.isSymbolicLink()) {
-          incomplete = true;
-        }
-      }
-    }
-    return { bytes, incomplete };
-  }
-
-  const timeout = new Promise((resolve) => {
-    timer = setTimeout(() => {
-      timedOut = true;
-      resolve({ bytes, incomplete: true });
-    }, DIRECTORY_SCAN_TIMEOUT);
-  });
+function redactNpmList(output) {
   try {
-    return await Promise.race([scan(), timeout]);
-  } finally {
-    clearTimeout(timer);
+    return JSON.stringify(JSON.parse(output), (_key, value) => typeof value === 'string' ? redactCredentials(value) : value);
+  } catch {
+    return redactCredentials(output);
   }
 }
 
-function readSmallTextFileSync(filePath, maxBytes) {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 64 * 1024) {
-    throw new RangeError('文件读取上限无效');
-  }
-  const fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
-  try {
-    const stats = fs.fstatSync(fd);
-    if (!stats.isFile()) throw Object.assign(new Error('版本声明必须是普通文件'), { code: 'EINVAL' });
-    const tooLarge = () => Object.assign(new Error(`版本声明文件不能超过 ${maxBytes} 字节`), { code: 'EFBIG' });
-    if (stats.size > maxBytes) throw tooLarge();
-
-    const bytes = Buffer.alloc(maxBytes + 1);
-    let used = 0;
-    while (used < bytes.length) {
-      const read = fs.readSync(fd, bytes, used, bytes.length - used, null);
-      if (read === 0) break;
-      used += read;
-    }
-    if (used > maxBytes) throw tooLarge();
-
-    const contents = bytes.subarray(0, used);
-    const text = contents.toString('utf8');
-    if (!Buffer.from(text, 'utf8').equals(contents)) {
-      throw Object.assign(new Error('请将版本声明保存为 UTF-8 文本'), { code: 'EILSEQ' });
-    }
-    return text;
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
-// Expose Node.js APIs to renderer
-window.nodeAPI = {
-  // Execute a program without invoking a shell.
-  execFile: (file, args = [], options = {}) => new Promise((resolve, reject) => {
-    if (typeof file !== 'string' || !file) {
-      reject(new TypeError('Command must be a non-empty string'));
-      return;
-    }
-
-    let command;
-    try {
-      command = resolveProgram(file, normalizeArgs(args));
-    } catch (error) {
-      reject(error);
-      return;
-    }
-
+function runCommand(command, options) {
+  return new Promise((resolve, reject) => {
     const opts = normalizeOptions(options, command);
     execFile(command.file, command.args, opts, (error, stdout, stderr) => {
       if (error) {
         const timedOut = Boolean(opts.timeout && error.killed && error.signal === 'SIGTERM');
         const message = timedOut ? '操作超时，请刷新状态后重试。' : stderr?.trim() || stdout?.trim() || error.message;
-        const commandError = new Error(message);
+        const commandError = new Error(command.npm ? redactNpmOutput(message) : message);
         commandError.code = timedOut ? 'ETIMEDOUT' : error.code;
         reject(commandError);
       } else {
-        resolve(stdout);
+        resolve(command.transformOutput ? command.transformOutput(stdout) : stdout);
       }
     });
-  }),
+  });
+}
+
+function runNpm(runtime, args, timeout = NPM_READ_TIMEOUT, transformOutput) {
+  return runCommand({ ...runtime, args: [...runtime.args, ...args], npm: true, transformOutput }, { timeout });
+}
+
+let globalPackageChangeInProgress = false;
+
+async function changeGlobalPackage(action, name, expectedPrefix) {
+  if (typeof name !== 'string' || name !== name.trim() || name.length > 214 || !PACKAGE_SPEC_PATTERN.test(name)) {
+    throw new Error('包名格式无效，仅支持包名及版本标签');
+  }
+  if (globalPackageChangeInProgress) throw new Error('另一个全局包操作正在进行');
+  globalPackageChangeInProgress = true;
+  try {
+    const runtime = resolveNpmRuntime();
+    const prefix = (await runNpm(runtime, ['prefix', '-g'])).trim();
+    if (!path.isAbsolute(prefix) || /[\x00-\x1f]/.test(prefix) || prefix !== expectedPrefix) {
+      throw new Error('npm 全局安装目录已变更，请刷新全局包列表后重新确认');
+    }
+
+    const args = [action, '-g', '--ignore-scripts', `--prefix=${prefix}`, name];
+    if (action === 'install') {
+      const registry = normalizeMirrorUrl((await runNpm(runtime, ['config', 'get', 'registry'])).trim());
+      if (!await confirmNpmInstall({ name, prefix, registry }, { runPowerShell, runCommand })) {
+        throw Object.assign(new Error('已取消全局包安装'), { code: 'ECANCELED' });
+      }
+      args.push(`--registry=${registry}`);
+    }
+    const timeout = action === 'install' ? NPM_INSTALL_TIMEOUT : NPM_WRITE_TIMEOUT;
+    return await runNpm(runtime, args, timeout, redactNpmOutput);
+  } finally {
+    globalPackageChangeInProgress = false;
+  }
+}
+
+async function cleanNpmCache(expectedDirectory) {
+  const runtime = resolveNpmRuntime();
+  const directory = (await runNpm(runtime, ['config', 'get', 'cache'])).trim();
+  if (!directory || directory !== expectedDirectory) {
+    throw new Error('npm 缓存目录已变更，请刷新后确认新的清理路径');
+  }
+  const canonical = await resolveNpmCacheDirectory(directory);
+  if (!canonical) return '';
+
+  const cache = await fs.promises.lstat(path.join(canonical, '_cacache')).catch((error) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (!cache) return '';
+  if (!cache.isDirectory() || cache.isSymbolicLink()) {
+    throw new Error('npm 缓存内容必须位于普通目录中，请检查 _cacache');
+  }
+  return runNpm(runtime, ['cache', 'clean', '--force', `--cache=${canonical}`], NPM_WRITE_TIMEOUT, redactNpmOutput);
+}
+
+function runPowerShell(args, timeout = 25000) {
+  if (process.platform !== 'win32') throw new Error('此功能仅支持 Windows');
+  const file = path.join(getWindowsDirectory(), 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  return runCommand({ file, args }, { timeout });
+}
+
+const { resolveNpmCacheDirectory, cleanIncompleteNvmVersion, ...filesystem } = createFilesystem({
+  fs,
+  path,
+  homeDirectory: os.homedir(),
+  nvmSymlink: cleanDirectory(process.env.NVM_SYMLINK),
+  detectNvmContext,
+  getWindowsDirectory,
+  getNpmCommandOutput: (args) => runNpm(resolveNpmRuntime(), args),
+});
+
+function publicNvmSettings(settings = {}) {
+  const mirrors = {};
+  for (const key of ['node_mirror', 'npm_mirror']) {
+    if (typeof settings[key] === 'string') mirrors[key] = redactCredentials(settings[key]);
+  }
+  return mirrors;
+}
+
+// Expose Node.js APIs to renderer
+window.nodeAPI = {
+  // Execute an allowlisted program without invoking a shell.
+  execFile: async (file, args = [], options = {}) => {
+    if (typeof file !== 'string' || !file) throw new TypeError('Command must be a non-empty string');
+    const normalizedArgs = normalizeArgs(args);
+    const nvm = ['nvm', 'nvm.exe'].includes(file.toLowerCase());
+    const [action] = normalizedArgs;
+    if (nvm && action === 'install') throw new Error('请使用 NVM 安装进度接口');
+    const execute = () => runCommand(resolveProgram(file, normalizedArgs), options);
+    return nvm && ['uninstall', 'use'].includes(action) ? withNvmMutation(execute) : execute();
+  },
 
   // Execute command with real-time output
   execFileWithProgress: (file, args = [], options = {}) => {
@@ -375,62 +413,108 @@ window.nodeAPI = {
       throw new TypeError('Command must be a non-empty string');
     }
 
-    const command = resolveProgram(file, normalizeArgs(args));
+    const normalizedArgs = normalizeArgs(args);
+    if (!['nvm', 'nvm.exe'].includes(file.toLowerCase()) || normalizedArgs[0] !== 'install') {
+      throw new Error('仅支持查看 NVM 安装进度');
+    }
+    const command = resolveProgram(file, normalizedArgs);
     const { cwd, env, timeout } = normalizeOptions(options, command);
-    const proc = spawn(command.file, command.args, {
-      shell: false,
-      windowsHide: true,
-      cwd,
-      env,
-    });
-    return {
-      kill: () => proc.kill(),
-      promise: new Promise((resolve, reject) => {
-        let stdout = '';
-        let stderr = '';
-        let timedOut = false;
-        const timer = setTimeout(() => {
-          timedOut = true;
-          const error = new Error('安装超时，可能有部分文件已写入。请先刷新已安装版本，再决定是否重试。');
-          error.code = 'ETIMEDOUT';
-          reject(error);
-          proc.kill();
-        }, Math.min(timeout || PROGRESS_TIMEOUT, PROGRESS_TIMEOUT));
+    const finishMutation = beginNvmMutation();
+    let proc;
+    try {
+      proc = spawn(command.file, command.args, { shell: false, windowsHide: true, cwd, env });
+    } catch (error) {
+      finishMutation();
+      throw error;
+    }
+    const stopSignal = 'SIGTERM';
+    let settled = false;
+    let exited = false;
+    let stopCode;
+    let deadline;
 
-        proc.stdout.setEncoding('utf8').on('data', (text) => {
-          if (timedOut) return;
-          stdout = (stdout + text).slice(-MAX_PROGRESS_TEXT);
-          options.onData?.(text);
-        });
-        proc.stderr.setEncoding('utf8').on('data', (text) => {
-          if (timedOut) return;
-          stderr = (stderr + text).slice(-MAX_PROGRESS_TEXT);
-          options.onData?.(text);
-        });
-        proc.on('close', (code) => {
-          clearTimeout(timer);
-          if (code === 0) {
-            resolve(stdout);
-          } else {
-            reject(new Error(stderr.trim() || stdout.trim() || `Process exited with code ${code}`));
-          }
-        });
-        proc.on('error', (err) => {
-          clearTimeout(timer);
-          reject(err);
-        });
-      }),
-    };
+    function requestStop(code) {
+      if (settled || exited || stopCode || proc.exitCode !== null || proc.signalCode !== null) return false;
+      try {
+        if (!proc.kill(stopSignal)) return false;
+      } catch {
+        return false;
+      }
+      stopCode = code;
+      clearTimeout(deadline);
+      return true;
+    }
+
+    const promise = new Promise((resolve, reject) => {
+      let stdout = '';
+      let stderr = '';
+      let drainTimer;
+      deadline = setTimeout(() => {
+        if (!requestStop('ETIMEDOUT') && !exited && proc.exitCode === null && proc.signalCode === null) {
+          options.onData?.('\n安装超过时限，正在等待当前 NVM 进程结束。\n');
+        }
+      }, Math.min(timeout || PROGRESS_TIMEOUT, PROGRESS_TIMEOUT));
+
+      function finish(code, signal, error) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        clearTimeout(drainTimer);
+        if (error) {
+          reject(error);
+        } else if (stopCode && code === null && signal === stopSignal) {
+          const message = stopCode === 'ETIMEDOUT'
+            ? '安装超时，可能有部分文件已写入。请先刷新已安装版本，再决定是否重试。'
+            : '已取消安装';
+          reject(Object.assign(new Error(message), { code: stopCode }));
+        } else if (code === 0) {
+          const output = [stdout, stderr].filter(Boolean).join('\n').slice(-MAX_PROGRESS_TEXT);
+          resolve(redactCredentials(output));
+        } else {
+          const message = stderr.trim() || stdout.trim() || `Process exited with code ${code}`;
+          reject(new Error(redactCredentials(message)));
+        }
+      }
+
+      proc.stdout.setEncoding('utf8').on('data', (text) => {
+        if (settled) return;
+        stdout = (stdout + text).slice(-MAX_PROGRESS_TEXT);
+        options.onData?.(text);
+      });
+      proc.stderr.setEncoding('utf8').on('data', (text) => {
+        if (settled) return;
+        stderr = (stderr + text).slice(-MAX_PROGRESS_TEXT);
+        options.onData?.(text);
+      });
+      proc.once('exit', (code, signal) => {
+        if (settled) return;
+        exited = true;
+        clearTimeout(deadline);
+        // Another process may have inherited a pipe. Keep the confirmed exit outcome and bound the drain.
+        drainTimer = setTimeout(() => {
+          finish(code, signal);
+          proc.stdout.destroy();
+          proc.stderr.destroy();
+        }, PROGRESS_DRAIN_TIMEOUT);
+      });
+      proc.once('close', finish);
+      proc.on('error', (error) => {
+        // A failed signal to a running child is not confirmation that it has stopped.
+        if (proc.pid === undefined) finish(null, null, error);
+      });
+    });
+
+    return { kill: () => requestStop('ECANCELED'), promise: promise.finally(finishMutation) };
   },
 
-  // File system
-  fs: {
-    existsSync: (p) => fs.existsSync(p),
-    readFileSync: (p, encoding) => fs.readFileSync(p, encoding),
-    readSmallTextFileSync,
-    statSync: (p) => fs.statSync(p),
-    readdirSync: (p) => fs.readdirSync(p),
-    getDirectorySize,
+  process: createProcessService(runPowerShell),
+
+  fs: filesystem,
+
+  npm: {
+    installGlobalPackage: (name, prefix) => changeGlobalPackage('install', name, prefix),
+    uninstallGlobalPackage: (name, prefix) => changeGlobalPackage('uninstall', name, prefix),
+    cleanCache: cleanNpmCache,
   },
 
   // Path utilities
@@ -451,10 +535,7 @@ window.nodeAPI = {
 
   // Environment
   env: {
-    ...Object.fromEntries(ALLOWED_ENV_KEYS.map((key) => [
-      key,
-      process.env[key] || (key === 'WINDIR' ? 'C:\\Windows' : ''),
-    ])),
+    WINDIR: getWindowsDirectory(),
     get NVM_HOME() {
       return process.env.NVM_HOME || getNvmPath('installDir');
     },
@@ -466,8 +547,17 @@ window.nodeAPI = {
   nvm: {
     getInstallDir: () => getNvmPath('installDir'),
     getRoot: () => getNvmPath('root'),
-    getSettings: () => detectNvmContext()?.settings || {},
-    setMirror: (key, url) => updateMirrorSetting(requireNvmContext().settingsPath, key, url),
-    setMirrors: (mirrors) => updateMirrorSettings(requireNvmContext().settingsPath, mirrors),
+    cleanIncompleteVersion: (version, expectedDirectory) => withNvmMutation(
+      () => cleanIncompleteNvmVersion(version, expectedDirectory),
+    ),
+    getSettings: () => publicNvmSettings(detectNvmContext()?.settings),
+    setMirror: (key, url) => {
+      assertNvmMutationIdle();
+      return publicNvmSettings(updateMirrorSetting(requireNvmContext().settingsPath, key, url));
+    },
+    setMirrors: (mirrors) => {
+      assertNvmMutationIdle();
+      return publicNvmSettings(updateMirrorSettings(requireNvmContext().settingsPath, mirrors));
+    },
   },
 };

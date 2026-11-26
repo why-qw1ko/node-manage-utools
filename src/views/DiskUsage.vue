@@ -5,8 +5,8 @@ import IconRefresh from '~icons/mdi/refresh';
 import IconDeleteSweep from '~icons/mdi/delete-sweep';
 import IconLoading from '~icons/mdi/loading';
 import IconFolderOpen from '~icons/mdi/folder-open-outline';
-import { getNpmPrefix, getNpmCacheDir, cleanNpmCache, isSafeCacheDirectory } from '../utils/npm.js';
-import { getNvmDir } from '../utils/nvm.js';
+import { cleanNpmCache } from '../utils/npm.js';
+import { getNvmDir, listInstalledVersions } from '../utils/nvm.js';
 import { openPath, showSuccess, showError } from '../utils/utools.js';
 import { confirmAction } from '../utils/confirm.js';
 
@@ -17,6 +17,7 @@ const npmCacheSize = ref('');
 const npmGlobalSize = ref('');
 const totalSize = ref('');
 const loadError = ref('');
+const versionsError = ref('');
 const cacheDirectory = ref('');
 const cacheWarning = ref('');
 const cacheActionError = ref('');
@@ -30,74 +31,55 @@ function formatSize(bytes) {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-async function getDirSize(dirPath) {
-  if (!dirPath) return { bytes: 0, label: '不可用', incomplete: true };
+async function getDirSize(scan) {
   try {
-    const { bytes, incomplete } = await window.nodeAPI.fs.getDirectorySize(dirPath);
+    const result = await scan();
+    const { bytes, incomplete } = result;
     const label = incomplete ? (bytes ? `至少 ${formatSize(bytes)}` : '读取不完整') : formatSize(bytes);
-    return { bytes, label, incomplete };
+    return { ...result, label };
   } catch {
     return { bytes: 0, label: '计算失败', incomplete: true };
   }
+}
+
+async function getVersionUsage(fs) {
+  if (!getNvmDir()) return [];
+  const versions = await listInstalledVersions();
+  return Promise.all(versions.map(async ({ version, path }) => {
+    const { label, bytes, incomplete } = await getDirSize(() => fs.getDirectorySize(path));
+    return { name: `v${version}`, path, size: label, bytes, incomplete };
+  }));
 }
 
 async function loadDiskUsage(silent = false) {
   if (loading.value) return;
   loading.value = true;
   loadError.value = '';
+  versionsError.value = '';
   cacheDirectory.value = '';
   cacheWarning.value = '';
   try {
-    const isWindows = window.nodeAPI.os.platform() === 'win32';
-    const path = window.nodeAPI.path;
-    const nvmHome = getNvmDir();
-    const [prefix, cache] = await Promise.allSettled([getNpmPrefix(), getNpmCacheDir()]);
-    const npmPrefix = prefix.status === 'fulfilled' ? prefix.value : '';
-    const npmCacheDir = cache.status === 'fulfilled' ? cache.value : '';
-    if (isSafeCacheDirectory(npmCacheDir)) cacheDirectory.value = npmCacheDir;
-    else cacheWarning.value = cache.reason?.message || 'npm 缓存路径无效，请检查 npm 配置中的 cache';
-    const npmGlobalDir = npmPrefix
-      ? path.join(npmPrefix, ...(isWindows ? ['node_modules'] : ['lib', 'node_modules']))
-      : '';
-
-    // Get node versions directories
     const fs = window.nodeAPI.fs;
-    if (nvmHome && fs.existsSync(nvmHome)) {
-      const entries = fs.readdirSync(nvmHome);
-      const versions = entries
-        .filter((name) => /^v\d+\.\d+\.\d+$/i.test(name))
-        .map((name) => ({
-          name,
-          path: path.join(nvmHome, name),
-          size: '计算中...',
-          bytes: 0,
-        })).filter((version) => {
-          try { return fs.statSync(version.path).isDirectory(); } catch { return false; }
-        });
-      nodeVersions.value = await Promise.all(versions.map(async (version) => {
-        const result = await getDirSize(version.path);
-        return {
-          ...version,
-          size: result.label,
-          bytes: result.bytes,
-          incomplete: result.incomplete,
-        };
-      }));
-    } else {
-      nodeVersions.value = [];
-    }
-
-    const [cacheResult, globalResult] = await Promise.all([
-      getDirSize(cacheDirectory.value),
-      getDirSize(npmGlobalDir),
+    const [versionUsage, cacheResult, globalResult] = await Promise.all([
+      getVersionUsage(fs).catch(() => {
+        versionsError.value = '无法读取 nvm 版本列表，请检查 nvm 配置后刷新。';
+        return [];
+      }),
+      getDirSize(() => fs.getNpmDirectorySize('cache')),
+      getDirSize(() => fs.getNpmDirectorySize('global')),
     ]);
+    nodeVersions.value = versionUsage;
+
+    cacheDirectory.value = cacheResult.directory || '';
+    if (!cacheDirectory.value) cacheWarning.value = 'npm 缓存目录不可用，请检查 npm 配置中的 cache';
     npmCacheSize.value = cacheResult.label;
     npmGlobalSize.value = globalResult.label;
 
     const totalBytes = nodeVersions.value.reduce((sum, version) => sum + version.bytes, 0)
       + cacheResult.bytes
       + globalResult.bytes;
-    const incomplete = cacheResult.incomplete || globalResult.incomplete || nodeVersions.value.some((version) => version.incomplete);
+    const incomplete = versionsError.value || cacheResult.incomplete || globalResult.incomplete
+      || nodeVersions.value.some((version) => version.incomplete);
     totalSize.value = incomplete ? (totalBytes ? `至少 ${formatSize(totalBytes)}` : '读取不完整') : formatSize(totalBytes);
 
     if (!silent) showSuccess('磁盘占用数据已刷新');
@@ -197,7 +179,7 @@ onMounted(() => loadDiskUsage(true)); // silent on initial load
         </div>
         <div v-if="nodeVersions.length === 0" class="empty-state" style="padding:24px">
           <IconHarddisk class="empty-state-icon" style="width:36px;height:36px" />
-          <p class="empty-state-desc">未检测到 nvm 安装的 Node 版本</p>
+          <p class="empty-state-desc">{{ versionsError || '未检测到 nvm 安装的 Node 版本' }}</p>
         </div>
         <div v-else class="usage-list">
           <div v-for="v in sortedVersions" :key="v.name" class="usage-item">

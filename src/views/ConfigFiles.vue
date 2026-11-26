@@ -1,17 +1,18 @@
 <script setup>
-import { ref, watch, onActivated } from 'vue';
+import { computed, ref, watch, onActivated } from 'vue';
 import IconFileCogOutline from '~icons/mdi/file-cog-outline';
 import IconRefresh from '~icons/mdi/refresh';
 import IconCogOutline from '~icons/mdi/cog-outline';
 import IconContentCopy from '~icons/mdi/content-copy';
 import ConfigFileCard from '../components/ConfigFileCard.vue';
-import { getConfigFiles, initNpmPrefix } from '../constants/files.js';
-import { getNpmCacheDir, getNpmConfig, getNpmGlobalConfigPath } from '../utils/npm.js';
+import { getConfigFileById, getConfigFiles } from '../constants/files.js';
+import { getNpmConfig } from '../utils/npm.js';
 import { openPath, copyToClipboard, showSuccess, showError } from '../utils/utools.js';
 
 const props = defineProps({ hasNvm: Boolean });
 
 const files = ref([]);
+const visibleFiles = computed(() => files.value.filter((file) => !file.requireNvm || props.hasNvm));
 const filesLoading = ref(false);
 const filesError = ref('');
 const npmConfig = ref('');
@@ -23,15 +24,7 @@ async function loadFiles(silent = false) {
   filesLoading.value = true;
   filesError.value = '';
   try {
-    const [globalConfig, cacheDir] = await Promise.all([
-      getNpmGlobalConfigPath().catch(() => ''),
-      getNpmCacheDir().catch(() => ''),
-      initNpmPrefix(),
-    ]);
-    const allFiles = getConfigFiles({ globalConfig, cacheDir });
-    files.value = allFiles
-      .filter((f) => !f.requireNvm || props.hasNvm)
-      .map((f) => ({ ...f, exists: checkPath(f.path, f.type) }));
+    files.value = await getConfigFiles();
     if (!silent) showSuccess('配置文件列表已刷新');
   } catch (err) {
     filesError.value = err.message || '配置文件列表读取失败';
@@ -59,20 +52,17 @@ async function loadNpmConfig(silent = false) {
   }
 }
 
-function checkPath(filePath, type) {
+async function handleOpen(file) {
+  let current;
   try {
-    const details = window.nodeAPI.fs.statSync(filePath);
-    return type === 'directory' ? details.isDirectory() : details.isFile();
+    current = await getConfigFileById(file.id);
   } catch {
-    return false;
+    showError('无法检查文件或目录，请刷新配置文件列表');
+    return;
   }
-}
-
-function handleOpen(fp) {
-  const file = files.value.find(({ path }) => path === fp);
-  if (!file || !checkPath(fp, file.type)) {
+  if (!current?.exists || current.path !== file.path) {
     showError('文件或目录已不可用，请刷新配置文件列表');
-  } else if (!openPath(fp)) {
+  } else if (!openPath(current.path)) {
     showError(file.needAdmin ? '无法打开 hosts，请检查权限或使用管理员编辑器' : '打开失败，请检查文件权限');
   }
 }
@@ -117,10 +107,10 @@ onActivated(() => {
     </div>
     <div v-else class="file-grid">
       <ConfigFileCard
-        v-for="file in files" :key="file.id"
+        v-for="file in visibleFiles" :key="file.id"
         :name="file.name" :description="file.description" :icon="file.icon"
         :path="file.path" :type="file.type" :exists="file.exists" :need-admin="file.needAdmin"
-        @open="handleOpen" @copy-path="handleCopyPath"
+        @open="handleOpen(file)" @copy-path="handleCopyPath"
       />
     </div>
 

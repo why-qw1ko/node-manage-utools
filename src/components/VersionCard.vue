@@ -7,12 +7,13 @@ defineProps({
   version: { type: String, required: true },
   active: { type: Boolean, default: false },
   lts: { type: [String, Boolean], default: false },
+  status: { type: String, default: 'ready' },
   installing: { type: Boolean, default: false },
   uninstalling: { type: Boolean, default: false },
   disabled: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(['use', 'uninstall']);
+const emit = defineEmits(['use', 'uninstall', 'reinstall']);
 </script>
 
 <template>
@@ -22,15 +23,25 @@ const emit = defineEmits(['use', 'uninstall']);
       <div class="version-text">
         <span class="version-number">v{{ version }}</span>
         <span v-if="lts" class="version-lts tag">{{ lts }}</span>
+        <span v-if="status !== 'ready'" class="version-lts tag tag-warning">
+          {{ status === 'incomplete' ? '安装未完成' : '安装状态待核对' }}
+        </span>
       </div>
     </div>
 
     <div class="version-actions">
       <span v-if="active" class="tag tag-success">当前使用</span>
-      <template v-else>
+      <template v-if="status === 'incomplete'">
+        <button type="button" class="btn btn-sm btn-primary" :disabled="disabled" @click="emit('reinstall', version)">重新安装</button>
+        <button v-if="!active" type="button" class="btn btn-sm btn-ghost" :disabled="disabled || uninstalling" @click="emit('uninstall', version)">
+          <IconLoading v-if="uninstalling" class="spin" />
+          <span>{{ uninstalling ? '清理中…' : '清理残留' }}</span>
+        </button>
+      </template>
+      <template v-else-if="!active">
         <button
           class="btn btn-sm btn-primary"
-          :disabled="disabled || installing || uninstalling"
+          :disabled="disabled || installing || uninstalling || status !== 'ready'"
           @click="emit('use', version)"
         >
           <IconLoading v-if="installing" class="spin" />

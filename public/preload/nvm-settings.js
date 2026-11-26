@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { redactCredentials } = require('./credentials.js');
 
 const MIRROR_KEYS = new Set(['node_mirror', 'npm_mirror']);
 const MAX_SETTINGS_BYTES = 64 * 1024;
@@ -63,7 +64,7 @@ function normalizeMirrorUrl(url) {
   if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname) {
     throw new Error('仅支持 HTTP/HTTPS 安装源');
   }
-  if (parsed.username || parsed.password) throw new Error('安装源地址不能包含账号或密码');
+  if (redactCredentials(parsed.href) !== parsed.href) throw new Error('安装源地址不能包含账号、密码或令牌');
   return parsed.href;
 }
 

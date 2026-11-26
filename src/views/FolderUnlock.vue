@@ -7,7 +7,7 @@ import IconContentCopy from '~icons/mdi/content-copy';
 import IconDeleteOutline from '~icons/mdi/delete-outline';
 import IconLoading from '~icons/mdi/loading';
 import IconAlertDecagram from '~icons/mdi/alert-decagram';
-import { findFolderOccupiers, killProcess, classifyProcess } from '../utils/process.js';
+import { findFolderOccupiers, killProcess, classifyProcess as levelTag } from '../utils/process.js';
 import { showSuccess, showError, openPath, copyToClipboard } from '../utils/utools.js';
 import { confirmAction } from '../utils/confirm.js';
 
@@ -102,7 +102,7 @@ async function detectCurrentFolder() {
 }
 
 async function confirmKill(proc, isCurrent) {
-  const cls = classifyProcess(proc.name, proc.pid);
+  const cls = levelTag(proc);
   if (cls.level === 'user') {
     return confirmAction({
       title: '终止进程',
@@ -121,14 +121,14 @@ async function confirmKill(proc, isCurrent) {
   if (!first || !isCurrent()) return false;
   return confirmAction({
     title: '最后确认',
-    message: `即将强制终止 ${proc.name} (PID: ${proc.pid})。\n${cls.level === 'critical' ? '该进程为系统关键进程，关闭可能导致系统崩溃或蓝屏！' : '关闭后相关系统服务可能失效。'}\n\n请再次确认。`,
+    message: `即将强制终止 ${proc.name} (PID: ${proc.pid})。\n关闭后相关系统服务可能失效。\n\n请再次确认。`,
     confirmText: '仍然终止',
     danger: true,
   });
 }
 
 async function handleKill(proc) {
-  if (busy.value || Number(proc.pid) <= 4) return;
+  if (busy.value || levelTag(proc).level === 'critical') return;
   const currentRequest = requestId;
   const path = detectedFolder.value;
   const isCurrent = () => currentRequest === requestId && path
@@ -156,10 +156,6 @@ async function handleKill(proc) {
     if (isCurrent()) await detectCurrentFolder();
     killingPid.value = null;
   }
-}
-
-function levelTag(proc) {
-  return classifyProcess(proc.name, proc.pid);
 }
 
 function copyProcessDetails(text, message) {
@@ -245,8 +241,8 @@ function openProcessDirectory(path) {
             </div>
             <button
               class="btn btn-sm btn-danger"
-              :disabled="busy || Number(proc.pid) <= 4"
-              :title="Number(proc.pid) <= 4 ? 'Windows 核心进程不可关闭' : undefined"
+              :disabled="busy || levelTag(proc).level === 'critical'"
+              :title="levelTag(proc).level === 'critical' ? '插件禁止关闭系统关键进程' : undefined"
               @click="handleKill(proc)"
             >
               <IconLoading v-if="killingPid === proc.pid" class="spin" />
@@ -258,7 +254,7 @@ function openProcessDirectory(path) {
           <div v-if="levelTag(proc).level !== 'user'" class="warn-banner" :class="levelTag(proc).level">
             <IconAlertDecagram class="warn-icon" />
             <span v-if="levelTag(proc).level === 'critical'">
-              {{ proc.name }} 是系统关键进程，强制关闭可能导致系统崩溃、蓝屏或无法登录，请谨慎操作。
+              {{ proc.name }} 是系统关键进程，插件已禁用关闭操作。
             </span>
             <span v-else>
               {{ proc.name }} 是系统服务/组件进程，关闭可能导致相关服务或界面异常。
